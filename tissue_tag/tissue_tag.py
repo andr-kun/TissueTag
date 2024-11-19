@@ -400,7 +400,7 @@ def annotator(imarray, annotation_object, plot_size=1024, invert_y=False, use_da
     """
     import logging
     logging.getLogger('bokeh.core.validation.check').setLevel(logging.ERROR)
-    
+
     # convert label image to rgb for annotation
     labels_rgb = rgb_from_labels(annotation_object)
     annotation = overlay_labels(imarray,labels_rgb,alpha=alpha,show=False)
@@ -444,20 +444,24 @@ def annotator(imarray, annotation_object, plot_size=1024, invert_y=False, use_da
         anno_tab_plot_list.append(path_dict[key])
         img_tab_plot_list.append(img_path_dict[key])
 
-    button = pn.widgets.Button(name='Update', button_type='primary')
+    update_button = pn.widgets.Button(name='Update', button_type='primary')
+    revert_button = pn.widgets.Button(name='Revert', button_type='danger', disabled=True)
     tab_object = pn.Tabs(("Annotation", hd.Overlay(anno_tab_plot_list).collate()),
                           ("Image", hd.Overlay(img_tab_plot_list).collate()), dynamic=False)
     # Create the tabbed view
-    p = pn.Column(button, tab_object)
+    p = pn.Column(pn.Row(update_button, revert_button), tab_object)
+
+    previous_labels = annotation_object.label_image.copy()
 
     def update_annotator(event):
-        nonlocal tab_object
+        nonlocal tab_object, previous_labels, revert_button
 
         if not event:
             return
 
         tab_object.loading = True
 
+        previous_labels = annotation_object.label_image.copy()
         updated_labels = annotation_object.label_image.copy()
         for idx, a in enumerate(render_dict.keys()):
             if render_dict[a].data['xs']:
@@ -489,8 +493,38 @@ def annotator(imarray, annotation_object, plot_size=1024, invert_y=False, use_da
                              ("Image", hd.Overlay(img_tab_plot_list).collate()), dynamic=False)
 
         p[1] = tab_object
+        revert_button.disabled = False
 
-    pn.bind(update_annotator, button, watch=True)
+    def revert_annotator(event):
+        nonlocal tab_object, previous_labels, revert_button
+
+        if not event:
+            return
+
+        tab_object.loading = True
+
+        annotation_object.label_image = previous_labels
+        labels_rgb = rgb_from_labels(annotation_object)
+        annotation = overlay_labels(imarray, labels_rgb, alpha=alpha, show=False)
+
+        annotation_c = annotation.astype('uint8').copy()
+        if not invert_y:
+            annotation_c = np.flip(annotation_c, 0)
+
+        anno = hv.RGB(annotation_c, bounds=(0, 0, annotation_c.shape[1], annotation_c.shape[0]))
+        if use_datashader:
+            anno = hd.regrid(anno)
+        ds_anno = anno.options(aspect="equal", frame_height=int(plot_size), frame_width=int(plot_size))
+
+        anno_tab_plot_list[0] = ds_anno
+        tab_object = pn.Tabs(("Annotation", hd.Overlay(anno_tab_plot_list).collate()),
+                             ("Image", hd.Overlay(img_tab_plot_list).collate()), dynamic=False)
+
+        p[1] = tab_object
+        revert_button.disabled = True
+
+    pn.bind(update_annotator, update_button, watch=True)
+    pn.bind(revert_annotator, revert_button, watch=True)
 
     return p
 
@@ -1133,14 +1167,17 @@ def poly_annotator(imarray, annotation_object, plot_size=1024, use_datashader=Fa
 
         anno_tab_plot_list.append(path_dict[key])
 
-    button = pn.widgets.Button(name='Update', button_type='primary')
+    update_button = pn.widgets.Button(name='Update', button_type='primary')
+    revert_button = pn.widgets.Button(name='Revert', button_type='danger', disabled=True)
     tab_object = pn.Tabs(("Annotation", hd.Overlay(anno_tab_plot_list).collate()),
                          ("Image", hd.Overlay(img_tab_plot_list).collate()), dynamic=False)
     # Create the tabbed view
-    p = pn.Column(button, tab_object)
+    p = pn.Column(pn.Row(update_button, revert_button), tab_object)
+
+    previous_labels = annotation_object.label_image.copy()
 
     def update_object_annotator(event):
-        nonlocal tab_object
+        nonlocal tab_object, previous_labels, revert_button
 
         if not event:
             return
@@ -1150,6 +1187,7 @@ def poly_annotator(imarray, annotation_object, plot_size=1024, use_datashader=Fa
         colorpool = ['green', 'cyan', 'brown', 'magenta', 'blue', 'red', 'orange']
         object_dict = {'unassigned': 'yellow'}
 
+        previous_labels = annotation_object.label_image.copy()
         updated_labels = annotation_object.label_image.copy()
         updated_labels[:] = 1
         for idx, a in enumerate(render_dict.keys()):
@@ -1183,8 +1221,39 @@ def poly_annotator(imarray, annotation_object, plot_size=1024, use_datashader=Fa
                              ("Image", hd.Overlay(img_tab_plot_list).collate()), dynamic=False)
 
         p[1] = tab_object
+        revert_button.disabled = False
 
-    pn.bind(update_object_annotator, button, watch=True)
+    def revert_object_annotator(event):
+        nonlocal tab_object, previous_labels, revert_button
+
+        if not event:
+            return
+
+        tab_object.loading = True
+
+        annotation_object.label_image = previous_labels
+        labels_rgb = rgb_from_labels(annotation_object)
+        annotation = overlay_labels(imarray, labels_rgb, alpha=alpha, show=False)
+
+        annotation_c = annotation.astype('uint8').copy()
+        if not invert_y:
+            annotation_c = np.flip(annotation_c, 0)
+
+        anno = hv.RGB(annotation_c, bounds=(0, 0, annotation_c.shape[1], annotation_c.shape[0]))
+        if use_datashader:
+            anno = hd.regrid(anno)
+        ds_anno = anno.options(aspect="equal", frame_height=int(plot_size), frame_width=int(plot_size))
+
+        anno_tab_plot_list[0] = ds_anno
+        tab_object = pn.Tabs(("Annotation", hd.Overlay(anno_tab_plot_list).collate()),
+                             ("Image", hd.Overlay(img_tab_plot_list).collate()), dynamic=False)
+
+        p[1] = tab_object
+        revert_button.disabled = True
+
+    pn.bind(update_object_annotator, update_button, watch=True)
+    pn.bind(revert_object_annotator, revert_button, watch=True)
+
     return p
 
 
