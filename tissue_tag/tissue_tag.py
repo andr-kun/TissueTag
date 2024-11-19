@@ -1,4 +1,7 @@
 import base64
+import copy
+from dataclasses import dataclass
+
 import bokeh
 import json
 import matplotlib
@@ -161,6 +164,11 @@ class SynchronisedFreehandDrawCallback(hv.plotting.bokeh.LinkCallback):
 
 # Register the callback class to the link class
 SynchronisedFreehandDrawLink.register_callback('bokeh', SynchronisedFreehandDrawCallback)
+
+@dataclass
+class annotation_output:
+    label_image: np.array
+    annotation_map: dict
 
 def to_base64(img):
     buffered = BytesIO()
@@ -362,60 +370,7 @@ def read_visium(
     return np.array(im), ppm, df
 
 
-def scribbler(imarray, anno_dict, plot_size=1024, use_datashader=False):
-    """
-    Creates interactive scribble line annotations with Holoviews.
-
-    Parameters
-    ----------
-    imarray : np.array
-        Image in numpy array format.
-    anno_dict : dict
-        Dictionary of structures to annotate and colors for the structures.
-    plot_size : int, optional
-        Used to adjust the plotting area size. Default is 1024.
-    use_datashader : Boolean, optional
-        If we should use datashader for rendering the image. Recommended for high resolution image. Default is False.
-
-    Returns
-    -------
-    holoviews.core.overlay.Overlay
-        A Holoviews overlay composed of the image and annotation layers.
-    dict
-        Dictionary of renderers for each annotation.
-    """
-
-    imarray_c = imarray.astype('uint8').copy()
-    imarray_c = np.flip(imarray_c, 0)
-
-    # Create a new holoview image
-    img = hv.RGB(imarray_c, bounds=(0, 0, imarray_c.shape[1], imarray_c.shape[0]))
-    if use_datashader:
-        img = hd.regrid(img)
-    ds_img = img.options(aspect="equal", frame_height=int(plot_size), frame_width=int(plot_size))
-
-    # Create the plot list object
-    plot_list = [ds_img]
-
-    # Render plot using bokeh backend
-    p = hv.render(img.options(aspect="equal", frame_height=int(plot_size), frame_width=int(plot_size)),
-                  backend="bokeh")
-
-    render_dict = {}
-    path_dict = {}
-    for key in anno_dict.keys():
-        path_dict[key] = hv.Path([]).opts(color=anno_dict[key], line_width=5, line_alpha=0.4)
-        render_dict[key] = CustomFreehandDraw(source=path_dict[key], num_objects=200, tooltip=key,
-                                              icon_colour=anno_dict[key])
-        plot_list.append(path_dict[key])
-
-    # Create the plot from the plot list
-    p = hd.Overlay(plot_list).collate()
-
-    return p, render_dict
-
-
-def annotator(imarray, labels, anno_dict, plot_size=1024,invert_y=False,use_datashader=False,alpha=0.7):
+def annotator(imarray, annotation_object, plot_size=1024, invert_y=False, use_datashader=False, alpha=0.7):
     """
     Interactive annotation tool with line annotations using Panel tabs for toggling between morphology and annotation.
 
@@ -447,9 +402,9 @@ def annotator(imarray, labels, anno_dict, plot_size=1024,invert_y=False,use_data
     logging.getLogger('bokeh.core.validation.check').setLevel(logging.ERROR)
     
     # convert label image to rgb for annotation
-    labels_rgb = rgb_from_labels(labels, colors=list(anno_dict.values()))
+    labels_rgb = rgb_from_labels(annotation_object)
     annotation = overlay_labels(imarray,labels_rgb,alpha=alpha,show=False)
-    
+
     annotation_c = annotation.astype('uint8').copy()
     if not invert_y:
         annotation_c = np.flip(annotation_c, 0)
@@ -476,24 +431,68 @@ def annotator(imarray, labels, anno_dict, plot_size=1024,invert_y=False,use_data
     img_render_dict = {}
     path_dict = {}
     img_path_dict = {}
-    for key in anno_dict.keys():
-        path_dict[key] = hv.Path([]).opts(color=anno_dict[key], line_width=5, line_alpha=0.4)
+    for key in annotation_object.annotation_map.keys():
+        path_dict[key] = hv.Path([]).opts(color=annotation_object.annotation_map[key], line_width=5, line_alpha=0.4)
         render_dict[key] = CustomFreehandDraw(source=path_dict[key], num_objects=200, tooltip=key,
-                                              icon_colour=anno_dict[key])
+                                              icon_colour=annotation_object.annotation_map[key])
 
-        img_path_dict[key] = hv.Path([]).opts(color=anno_dict[key], line_width=5, line_alpha=0.4)
+        img_path_dict[key] = hv.Path([]).opts(color=annotation_object.annotation_map[key], line_width=5, line_alpha=0.4)
         img_render_dict[key] = CustomFreehandDraw(source=img_path_dict[key], num_objects=200, tooltip=key,
-                                              icon_colour=anno_dict[key])
+                                                  icon_colour=annotation_object.annotation_map[key])
 
         SynchronisedFreehandDrawLink(path_dict[key], img_path_dict[key])
         anno_tab_plot_list.append(path_dict[key])
         img_tab_plot_list.append(img_path_dict[key])
 
+    button = pn.widgets.Button(name='Update', button_type='primary')
+    tab_object = pn.Tabs(("Annotation", hd.Overlay(anno_tab_plot_list).collate()),
+                          ("Image", hd.Overlay(img_tab_plot_list).collate()), dynamic=False)
     # Create the tabbed view
-    p = pn.Tabs(("Annotation", pn.panel(hd.Overlay(anno_tab_plot_list).collate())),
-                ("Image", pn.panel(hd.Overlay(img_tab_plot_list).collate())), dynamic=False)
-    return p, render_dict
+    p = pn.Column(button, tab_object)
 
+    def update_annotator(event):
+        nonlocal tab_object
+
+        if not event:
+            return
+
+        tab_object.loading = True
+
+        updated_labels = annotation_object.label_image.copy()
+        for idx, a in enumerate(render_dict.keys()):
+            if render_dict[a].data['xs']:
+                for o in range(len(render_dict[a].data['xs'])):
+                    x = np.array(render_dict[a].data['xs'][o]).astype(int)
+                    y = np.array(render_dict[a].data['ys'][o]).astype(int)
+                    rr, cc = polygon(y, x)
+                    inshape = np.where(
+                        np.array(annotation_object.label_image.shape[0] > rr) & np.array(0 < rr) & np.array(annotation_object.label_image.shape[1] > cc) & np.array(
+                            0 < cc))[0]
+                    updated_labels[rr[inshape], cc[inshape]] = idx + 1
+
+        annotation_object.label_image = updated_labels
+
+        labels_rgb = rgb_from_labels(annotation_object)
+        annotation = overlay_labels(imarray, labels_rgb, alpha=alpha, show=False)
+
+        annotation_c = annotation.astype('uint8').copy()
+        if not invert_y:
+            annotation_c = np.flip(annotation_c, 0)
+
+        anno = hv.RGB(annotation_c, bounds=(0, 0, annotation_c.shape[1], annotation_c.shape[0]))
+        if use_datashader:
+            anno = hd.regrid(anno)
+        ds_anno = anno.options(aspect="equal", frame_height=int(plot_size), frame_width=int(plot_size))
+
+        anno_tab_plot_list[0] = ds_anno
+        tab_object = pn.Tabs(("Annotation", hd.Overlay(anno_tab_plot_list).collate()),
+                             ("Image", hd.Overlay(img_tab_plot_list).collate()), dynamic=False)
+
+        p[1] = tab_object
+
+    pn.bind(update_annotator, button, watch=True)
+
+    return p
 
 
 def complete_pixel_gaps(x,y):
@@ -542,58 +541,7 @@ def complete_pixel_gaps(x,y):
     return new_x, new_y
 
 
-
-def scribble_to_labels(imarray, render_dict, line_width=10):
-    """
-    Extract scribbles to a label image.
-    
-    Parameters
-    ----------
-    imarray: np.array
-        Image in numpy array format used to calculate the label image size.
-    render_dict: dict
-        Bokeh object carrying annotations.
-    line_width: int
-        Width of the line labels.
-
-    Returns
-    -------
-    np.array
-        Annotation image.
-    """
-    annotations = {}
-    training_labels = np.zeros((imarray.shape[1], imarray.shape[0]), dtype=np.uint8)
-
-    for idx, a in enumerate(render_dict.keys()):
-        xs = []
-        ys = []
-        annotations[a] = []
-
-        for o in range(len(render_dict[a].data['xs'])):
-            xt, yt = complete_pixel_gaps(
-                np.array(render_dict[a].data['xs'][o]).astype(int),
-                np.array(render_dict[a].data['ys'][o]).astype(int)
-            )
-            xs.extend(xt)
-            ys.extend(yt)
-            annotations[a].append(np.vstack([
-                np.array(render_dict[a].data['xs'][o]).astype(int),
-                np.array(render_dict[a].data['ys'][o]).astype(int)
-            ]))
-
-        xs = np.array(xs)
-        ys = np.array(ys)
-        inshape = (xs > 0) & (xs < imarray.shape[1]) & (ys > 0) & (ys < imarray.shape[0])
-        xs = xs[inshape]
-        ys = ys[inshape]
-        
-        training_labels[np.floor(xs).astype(int), np.floor(ys).astype(int)] = idx + 1
-  
-    training_labels = training_labels.transpose()
-    return skimage.segmentation.expand_labels(training_labels, distance=line_width / 2)
-
-
-def rgb_from_labels(labelimage, colors):
+def rgb_from_labels(annotation_object):
     """
     Helper function to plot from label images.
     
@@ -609,18 +557,19 @@ def rgb_from_labels(labelimage, colors):
     np.array
         Annotation image.
     """
-    labelimage_rgb = np.zeros((labelimage.shape[0], labelimage.shape[1], 4))
-    
+    labelimage_rgb = np.zeros((annotation_object.label_image.shape[0], annotation_object.label_image.shape[1], 4))
+
+    colors = list(annotation_object.annotation_map.values())
     for c in range(len(colors)):
         color = ImageColor.getcolor(colors[c], "RGB")
-        labelimage_rgb[labelimage == c + 1, 0:3] = np.array(color)
+        labelimage_rgb[annotation_object.label_image == c + 1, 0:3] = np.array(color)
 
     labelimage_rgb[:, :, 3] = 255
     return labelimage_rgb.astype('uint8')
 
 
 
-def sk_rf_classifier(im, training_labels,anno_dict,plot=True):
+def sk_rf_classifier(im, annotation_object, plot=True):
     """
     A simple random forest pixel classifier from sklearn.
     
@@ -650,15 +599,13 @@ def sk_rf_classifier(im, training_labels,anno_dict,plot=True):
     features = features_func(im)
     clf = RandomForestClassifier(n_estimators=50, n_jobs=-1,
                                  max_depth=10, max_samples=0.05)
-    clf = future.fit_segmenter(training_labels, features, clf)
+    clf = future.fit_segmenter(annotation_object.label_image, features, clf)
     
-    labels = future.predict_segmenter(features, clf)
+    annotation_object.label_image = future.predict_segmenter(features, clf)
     
     if plot:
-        labels_rgb = rgb_from_labels(labels,colors=list(anno_dict.values()))
+        labels_rgb = rgb_from_labels(annotation_object)
         overlay_labels(im,labels_rgb,alpha=0.7)
-    
-    return labels
 
 def overlay_labels(im1, im2, alpha=0.8, show=True):
     """
@@ -691,45 +638,7 @@ def overlay_labels(im1, im2, alpha=0.8, show=True):
         plt.imshow(out_img,origin='lower')
     return out_img
    
-def update_annotator(imarray, labels, anno_dict, render_dict, alpha=0.5,plot=True):
-    """
-    Updates annotations and generates overlay (out_img) and the label image (corrected_labels).
-        
-    Parameters
-    ----------
-    imarray : numpy.ndarray
-        Image in numpy array format.
-    labels : numpy.ndarray
-        Label image in numpy array format.
-    anno_dict : dict
-        Dictionary of structures to annotate and colors for the structures.
-    render_dict : dict
-        Bokeh data container.
-    alpha : float
-        Blending factor.
-    plot
-        if the plot the updated annotations. default is True. 
-        
-    Returns
-    -------
-    Returns corrected labels as numpy array.
-    """
-    
-    corrected_labels = labels.copy()
-    for idx, a in enumerate(render_dict.keys()):
-        if render_dict[a].data['xs']:
-            print(a)
-            for o in range(len(render_dict[a].data['xs'])):
-                x = np.array(render_dict[a].data['xs'][o]).astype(int)
-                y = np.array(render_dict[a].data['ys'][o]).astype(int)
-                rr, cc = polygon(y, x)
-                inshape = np.where(np.array(labels.shape[0] > rr) & np.array(0 < rr) & np.array(labels.shape[1] > cc) & np.array(0 < cc))[0]
-                corrected_labels[rr[inshape], cc[inshape]] = idx + 1
-    if plot:            
-        rgb = rgb_from_labels(corrected_labels, list(anno_dict.values()))
-        out_img = overlay_labels(imarray, rgb, alpha=alpha)
 
-    return corrected_labels
 
 
 def rescale_image(label_image, target_size):
@@ -753,7 +662,7 @@ def rescale_image(label_image, target_size):
     return np.array(imP.resize(newsize))
 
 
-def save_annotation(folder, label_image, file_name, anno_names, anno_colors, ppm):
+def save_annotation(folder, file_name, annotation_object, ppm):
     """
     Saves the annotated image as .tif and in addition saves the translation 
     from annotations to labels in a pickle file.
@@ -773,8 +682,10 @@ def save_annotation(folder, label_image, file_name, anno_names, anno_colors, ppm
     ppm : float
         Pixels per microns.
     """
-    
-    label_image = Image.fromarray(label_image)
+    anno_names = list(annotation_object.annotation_map.keys())
+    anno_colors = list(annotation_object.annotation_map.values())
+
+    label_image = Image.fromarray(annotation_object.label_image)
     label_image.save(folder + file_name + '.tif')
     with open(folder + file_name + '.pickle', 'wb') as handle:
         pickle.dump(dict(zip(range(1, len(anno_names) + 1), anno_names)), handle, protocol=pickle.HIGHEST_PROTOCOL)
@@ -804,6 +715,7 @@ def load_annotation(folder, file_name, load_colors=False):
         Returns annotation image, annotation order, pixels per microns, and annotation color.
         If `load_colors` is False, annotation color is not returned.
     """
+    #TODO: change output type to annotation_object
     
     imP = Image.open(folder + file_name + '.tif')
 
@@ -931,6 +843,7 @@ def grid_anno(
     ppm_in,
     ppm_out,
 ):
+    #TODO: incorporate annotation_object to this function and the functions that call this function
     print(f'Generating grid with spacing - {spot_to_spot}, from annotation resolution of - {ppm_in} ppm')
     
     positions = generate_hires_grid(im, spot_to_spot, ppm_in).T  # Transpose for correct orientation
@@ -1159,7 +1072,7 @@ def plot_grid(df, annotation, spotsize=10, save=False, dpi=100, figsize=(5,5), s
     plt.show()
 
     
-def poly_annotator(imarray, annotation, anno_dict, plot_size=1024, use_datashader=False):
+def poly_annotator(imarray, annotation_object, plot_size=1024, use_datashader=False, alpha=0.7, invert_y=False):
     """
     Interactive annotation tool with line annotations using Panel tabs for toggling between morphology and annotation.
     The principle is that selecting closed/semiclosed shaped that will later be filled according to the proper annotation.
@@ -1185,11 +1098,17 @@ def poly_annotator(imarray, annotation, anno_dict, plot_size=1024, use_datashade
         Dictionary containing the Bokeh renderers for the annotation lines.
     """
 
+    # convert label image to rgb for annotation
+    labels_rgb = rgb_from_labels(annotation_object)
+    annotation = overlay_labels(imarray,labels_rgb, alpha=alpha,show=False)
+
     annotation_c = annotation.astype('uint8').copy()
-    annotation_c = np.flip(annotation_c, 0)
+    if not invert_y:
+        annotation_c = np.flip(annotation_c, 0)
 
     imarray_c = imarray.astype('uint8').copy()
-    imarray_c = np.flip(imarray_c, 0)
+    if not invert_y:
+        imarray_c = np.flip(imarray_c, 0)
 
     # Create new holoview images
     anno = hv.RGB(annotation_c, bounds=(0, 0, annotation_c.shape[1], annotation_c.shape[0]))
@@ -1207,65 +1126,69 @@ def poly_annotator(imarray, annotation, anno_dict, plot_size=1024, use_datashade
 
     render_dict = {}
     path_dict = {}
-    for key in anno_dict.keys():
-        path_dict[key] = hv.Path([]).opts(color=anno_dict[key], line_width=3, line_alpha=0.6)
+    for key in annotation_object.annotation_map.keys():
+        path_dict[key] = hv.Path([]).opts(color=annotation_object.annotation_map[key], line_width=3, line_alpha=0.6)
         render_dict[key] = CustomPolyDraw(source=path_dict[key], num_objects=300, tooltip=key,
-                                          icon_colour=anno_dict[key])
+                                          icon_colour=annotation_object.annotation_map[key])
 
         anno_tab_plot_list.append(path_dict[key])
 
+    button = pn.widgets.Button(name='Update', button_type='primary')
+    tab_object = pn.Tabs(("Annotation", hd.Overlay(anno_tab_plot_list).collate()),
+                         ("Image", hd.Overlay(img_tab_plot_list).collate()), dynamic=False)
     # Create the tabbed view
-    p = pn.Tabs(("Annotation", pn.panel(hd.Overlay(anno_tab_plot_list).collate())),
-                ("Image", pn.panel(hd.Overlay(img_tab_plot_list).collate())), dynamic=False)
-    return p, render_dict
+    p = pn.Column(button, tab_object)
+
+    def update_object_annotator(event):
+        nonlocal tab_object
+
+        if not event:
+            return
+
+        tab_object.loading = True
+
+        colorpool = ['green', 'cyan', 'brown', 'magenta', 'blue', 'red', 'orange']
+        object_dict = {'unassigned': 'yellow'}
+
+        updated_labels = annotation_object.label_image.copy()
+        updated_labels[:] = 1
+        for idx, a in enumerate(render_dict.keys()):
+            if render_dict[a].data['xs']:
+                print(a)
+                for o in range(len(render_dict[a].data['xs'])):
+                    x = np.array(render_dict[a].data['xs'][o]).astype(int)
+                    y = np.array(render_dict[a].data['ys'][o]).astype(int)
+                    rr, cc = polygon(y, x)
+                    inshape = (annotation_object.label_image.shape[0] > rr) & (0 < rr) & (annotation_object.label_image.shape[1] > cc) & (
+                                0 < cc)  # make sure pixels outside the image are ignored
+                    updated_labels[rr[inshape], cc[inshape]] = o + 2
+                    object_dict[a + '_' + str(o)] = random.choice(colorpool)
+
+        annotation_object.label_image = updated_labels
+
+        labels_rgb = rgb_from_labels(annotation_object)
+        annotation = overlay_labels(imarray, labels_rgb, alpha=alpha, show=False)
+
+        annotation_c = annotation.astype('uint8').copy()
+        if not invert_y:
+            annotation_c = np.flip(annotation_c, 0)
+
+        anno = hv.RGB(annotation_c, bounds=(0, 0, annotation_c.shape[1], annotation_c.shape[0]))
+        if use_datashader:
+            anno = hd.regrid(anno)
+        ds_anno = anno.options(aspect="equal", frame_height=int(plot_size), frame_width=int(plot_size))
+
+        anno_tab_plot_list[0] = ds_anno
+        tab_object = pn.Tabs(("Annotation", hd.Overlay(anno_tab_plot_list).collate()),
+                             ("Image", hd.Overlay(img_tab_plot_list).collate()), dynamic=False)
+
+        p[1] = tab_object
+
+    pn.bind(update_object_annotator, button, watch=True)
+    return p
 
 
-def object_annotator(imarray, result, anno_dict, render_dict, alpha):
-    """
-    Extracts annotations and labels them according to brush strokes while generating out_img and the label image corrected_labels, and the anno_dict object.
-
-    Parameters
-    ----------
-    imarray : numpy.ndarray
-        Image in numpy array format.
-    result : numpy.ndarray
-        Label image in numpy array format.
-    anno_dict : dict
-        Dictionary of structures to annotate and colors for the structures.
-    render_dict : dict
-        Bokeh data container.
-    alpha : float
-        Blending factor.
-
-    Returns
-    -------
-    numpy.ndarray
-        Corrected label image.
-    dict
-        Dictionary containing the object colors.
-    """
-
-    colorpool = ['green', 'cyan', 'brown', 'magenta', 'blue', 'red', 'orange']
-
-    result[:] = 1
-    corrected_labels = result.copy()
-    object_dict = {'unassigned': 'yellow'}
-
-    for idx,a in enumerate(render_dict.keys()):
-        if render_dict[a].data['xs']:
-            print(a)
-            for o in range(len(render_dict[a].data['xs'])):
-                x = np.array(render_dict[a].data['xs'][o]).astype(int)
-                y = np.array(render_dict[a].data['ys'][o]).astype(int)
-                rr, cc = polygon(y, x)
-                inshape = (result.shape[0]>rr) & (0<rr) & (result.shape[1]>cc) & (0<cc)         # make sure pixels outside the image are ignored
-                corrected_labels[rr[inshape], cc[inshape]] = o+2
-                object_dict[a+'_'+str(o)] = random.choice(colorpool)
-
-    return corrected_labels, object_dict
-
-
-def gene_labels(path, df, labels, gene_markers, annodict, r,every_x_spots = 100):
+def gene_labels(path, df, gene_markers, annotation_object, r,every_x_spots = 100):
     """
     Assign labels to training spots based on gene expression.
 
@@ -1296,7 +1219,7 @@ def gene_labels(path, df, labels, gene_markers, annodict, r,every_x_spots = 100)
     adata = scanpy.read_visium(path,count_file='raw_feature_bc_matrix.h5')
     adata = adata[df.index.intersection(adata.obs.index)]
     coordinates = np.array(df.loc[:,['pxl_col','pxl_row']])
-    labels = background_labels(labels.shape[:2],coordinates.T,every_x_spots = 101,r=r) 
+    labels = background_labels(annotation_object.label_image.shape[:2], coordinates.T, every_x_spots = 101, r=r)
 
     for m in list(gene_markers.keys()):
         print(gene_markers[m])
@@ -1305,12 +1228,13 @@ def gene_labels(path, df, labels, gene_markers, annodict, r,every_x_spots = 100)
         GeneData = adata.X[:, GeneIndex].todense()
         SortedExp = np.argsort(GeneData, axis=0)[::-1]
         list_gene = adata.obs.index[np.array(np.squeeze(SortedExp[range(gene_markers[m][1])]))[0]]
-        for idx, sub in enumerate(list(annodict.keys())):
+        for idx, sub in enumerate(list(annotation_object.annotation_map.keys())):
             if sub == m:
                 back = idx
         for coor in df.loc[list_gene, ['pxl_row','pxl_col']].to_numpy():
             labels[disk((coor[0], coor[1]), r)] = back + 1
-    return labels
+
+    annotation_object.label_image = labels
 
 
 def background_labels(shape, coordinates, r, every_x_spots=10, label=1):
