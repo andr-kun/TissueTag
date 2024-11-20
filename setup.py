@@ -20,7 +20,7 @@ setup(
         'scikit-learn',
         'holoviews',
         'datashader',
-        'panel==1.3.8',
+        'panel==1.4.5',
         'jupyterlab'
     ],
     author='Oren Amsalem, Nadav Yayon, Andrian Yang',
