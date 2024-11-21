@@ -479,20 +479,16 @@ def save_annotation(folder, file_name, label_annotation, ppm):
     ppm : float
         Pixels per microns.
     """
-    anno_names = list(label_annotation.annotation_map.keys())
-    anno_colors = list(label_annotation.annotation_map.values())
 
     label_image = Image.fromarray(label_annotation.label_image)
     label_image.save(folder + file_name + '.tif')
     with open(folder + file_name + '.pickle', 'wb') as handle:
-        pickle.dump(dict(zip(range(1, len(anno_names) + 1), anno_names)), handle, protocol=pickle.HIGHEST_PROTOCOL)
-    with open(folder + file_name + '_colors.pickle', 'wb') as handle:
-        pickle.dump(dict(zip(anno_names, anno_colors)), handle, protocol=pickle.HIGHEST_PROTOCOL)
+        pickle.dump(label_annotation.annotation_map, handle, protocol=pickle.HIGHEST_PROTOCOL)
     with open(folder + file_name + '_ppm.pickle', 'wb') as handle:
         pickle.dump({'ppm': ppm}, handle, protocol=pickle.HIGHEST_PROTOCOL)
 
 
-def load_annotation(folder, file_name, load_colors=False):
+def load_annotation(folder, file_name):
     """
     Loads the annotated image from a .tif file and the translation from annotations
     to labels from a pickle file.
@@ -512,7 +508,6 @@ def load_annotation(folder, file_name, load_colors=False):
         Returns annotation image, annotation order, pixels per microns, and annotation color.
         If `load_colors` is False, annotation color is not returned.
     """
-    #TODO: change output type to label_annotation
 
     imP = Image.open(folder + file_name + '.tif')
 
@@ -521,23 +516,15 @@ def load_annotation(folder, file_name, load_colors=False):
 
     print(f'loaded annotation image - {file_name} size - {str(im.shape)}')
     with open(folder + file_name + '.pickle', 'rb') as handle:
-        anno_order = pickle.load(handle)
-        print('loaded annotations')
-        print(anno_order)
+        annotation_map = pickle.load(handle)
+        print('loaded annotation map')
+        print(annotation_map)
     with open(folder + file_name + '_ppm.pickle', 'rb') as handle:
         ppm = pickle.load(handle)
         print('loaded ppm')
         print(ppm)
 
-    if load_colors:
-        with open(folder + file_name + '_colors.pickle', 'rb') as handle:
-            anno_color = pickle.load(handle)
-            print('loaded color annotations')
-            print(anno_color)
-        return im, anno_order, ppm['ppm'], anno_color
-
-    else:
-        return im, anno_order, ppm['ppm']
+    return LabelAnnotation(im, annotation_map), ppm['ppm']
 
 
 def segmenter(imarray, label_annotation, plot_size=1024, use_datashader=False, invert_y=False,

@@ -373,7 +373,6 @@ def grid_anno(
     ppm_in,
     ppm_out,
 ):
-    #TODO: incorporate annotation_object to this function and the functions that call this function
     print(f'Generating grid with spacing - {spot_to_spot}, from annotation resolution of - {ppm_in} ppm')
     
     positions = generate_hires_grid(im, spot_to_spot, ppm_in).T  # Transpose for correct orientation
@@ -679,7 +678,7 @@ def anno_transfer(df_spots, df_grid, ppm_spots, ppm_grid, plot=True, how='neares
 
 
 
-def anno_to_grid(folder, file_name, spot_to_spot, load_colors=False,null_number=1):
+def anno_to_grid(folder, file_name, spot_to_spot):
     """
     Load annotations and transform them into a spot grid, output is always in micron space to make sure distance calculations are correct,
     or in other words ppm=1.
@@ -694,8 +693,6 @@ def anno_to_grid(folder, file_name, spot_to_spot, load_colors=False,null_number=
         The distance in microns used for grid spacing.
     load_colors : bool, optional
         If True, get original colors used for annotations. Default is False.
-    null_numer : int
-        value of the label image where no useful information is stored e.g. background or unassigned pixels (usually 0 or 1). Default is 1
 
     Returns
     -------
@@ -703,13 +700,13 @@ def anno_to_grid(folder, file_name, spot_to_spot, load_colors=False,null_number=
         Dataframe with the grid annotations.
     """
     
-    im, anno_order, ppm, anno_color = load_annotation(folder, file_name, load_colors)
+    annotation_object, ppm = load_annotation(folder, file_name)
 
     df = grid_anno(
-        im,
-        [im],
+        annotation_object.label_image,
+        [annotation_object.label_image,],
         [file_name],
-        [anno_order],
+        [annotation_object.annotation_map.keys()],
         spot_to_spot,
         ppm,
         1,
