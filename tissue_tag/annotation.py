@@ -1,9 +1,12 @@
 import base64
+import copy
 import pickle
 import random
 from dataclasses import dataclass
 from functools import partial
 from io import BytesIO
+from typing import Optional
+from collections import OrderedDict
 
 import bokeh
 import holoviews as hv
@@ -148,8 +151,8 @@ SynchronisedFreehandDrawLink.register_callback('bokeh', SynchronisedFreehandDraw
 
 @dataclass
 class LabelAnnotation:
-    label_image: np.array
-    annotation_map: dict
+    label_image: Optional[np.array] = None
+    annotation_map: Optional[dict] = None
 
 
 def to_base64(img):
@@ -171,7 +174,8 @@ def create_icon(name, color):
 
 # Annotation functions
 
-def annotator(imarray, annotation_object, plot_size=1024, invert_y=False, use_datashader=False):
+def annotator(imarray, label_annotation, plot_size=1024, invert_y=False, use_datashader=False,
+              unassigned_colour="yellow"):
     """
     Interactive annotation tool with line annotations using Panel tabs for toggling between morphology and annotation.
 
@@ -189,8 +193,6 @@ def annotator(imarray, annotation_object, plot_size=1024, invert_y=False, use_da
         invert plot along y axis
     use_datashader : Boolean, optional
         If we should use datashader for rendering the image. Recommended for high resolution image. Default is False.
-    alpha
-        blending extent of "Annotation" tab
 
     Returns
     -------
@@ -202,8 +204,19 @@ def annotator(imarray, annotation_object, plot_size=1024, invert_y=False, use_da
     import logging
     logging.getLogger('bokeh.core.validation.check').setLevel(logging.ERROR)
 
-    # convert label image to rgb for annotation
-    annotation = rgb_from_labels(annotation_object)
+    if label_annotation.annotation_map is None:
+        raise ValueError("Annotation map is missing. Please provide annotation map.")
+    else:
+        label_annotation.annotation_map = OrderedDict(label_annotation.annotation_map)
+        label_annotation.annotation_map["unassigned"] = unassigned_colour
+        label_annotation.annotation_map.move_to_end("unassigned", last=False)
+
+    if label_annotation.label_image is None:
+        label_image = np.zeros((imarray.shape[0], imarray.shape[1]), dtype=np.uint8)
+        label_annotation.label_image = label_image
+        annotation = rgb_from_labels(LabelAnnotation(label_image=label_image, annotation_map={'default': '#00000000'}))
+    else:
+        annotation = rgb_from_labels(label_annotation)
 
     annotation_c = annotation.astype('uint8').copy()
     if not invert_y:
@@ -217,38 +230,40 @@ def annotator(imarray, annotation_object, plot_size=1024, invert_y=False, use_da
     revert_button = pn.widgets.Button(name='Revert', button_type='danger', disabled=True)
     label_opacity = pn.widgets.FloatSlider(name='Label overlay', value=0.5, start=0, end=1, step=0.1)
 
-    # Create new holoview images
-    anno = hv.RGB(annotation_c, bounds=(0, 0, annotation_c.shape[1], annotation_c.shape[0]))
-    if use_datashader:
-        anno = hd.regrid(anno)
-    ds_anno = (anno.
-               options(aspect="equal", frame_height=int(plot_size),
-                       frame_width=int(plot_size), alpha=label_opacity.value).
-               apply.opts(alpha=label_opacity.param.value))
-    ds_anno.opts(backend_opts={"plot.toolbar_location": "left"})
+    def create_images(annotation_c=annotation_c, imarray_c=imarray_c):
+        # Create new holoview images
+        anno = hv.RGB(annotation_c, bounds=(0, 0, annotation_c.shape[1], annotation_c.shape[0]))
+        if use_datashader:
+            anno = hd.regrid(anno)
+        ds_anno = (anno.
+                   options(aspect="equal", frame_height=int(plot_size),
+                           frame_width=int(plot_size), alpha=label_opacity.value).
+                   apply.opts(alpha=label_opacity.param.value))
+        ds_anno.opts(backend_opts={"plot.toolbar_location": "left"})
 
-    img = hv.RGB(imarray_c, bounds=(0, 0, imarray_c.shape[1], imarray_c.shape[0]))
-    if use_datashader:
-        img = hd.regrid(img)
-    ds_img = img.options(aspect="equal", frame_height=int(plot_size), frame_width=int(plot_size))
+        img = hv.RGB(imarray_c, bounds=(0, 0, imarray_c.shape[1], imarray_c.shape[0]))
+        if use_datashader:
+            img = hd.regrid(img)
+        ds_img = img.options(aspect="equal", frame_height=int(plot_size), frame_width=int(plot_size))
 
-    plot_list = [ds_img, ds_anno]
+        return [ds_img, ds_anno]
+
+    plot_list = create_images()
 
     render_dict = {}
     path_dict = {}
-    for key in annotation_object.annotation_map.keys():
-        path_dict[key] = hv.Path([]).opts(color=annotation_object.annotation_map[key], line_width=5, line_alpha=0.4)
+    for key in label_annotation.annotation_map.keys():
+        path_dict[key] = hv.Path([]).opts(color=label_annotation.annotation_map[key], line_width=5, line_alpha=0.7)
         render_dict[key] = CustomFreehandDraw(source=path_dict[key], num_objects=200, tooltip=key,
-                                              icon_colour=annotation_object.annotation_map[key])
+                                              icon_colour=label_annotation.annotation_map[key])
 
         plot_list.append(path_dict[key])
-
 
     tab_object = pn.panel(hd.Overlay(plot_list).collate())
     # Create the tabbed view
     p = pn.Column(pn.Row(label_opacity, update_button, revert_button), tab_object)
 
-    previous_labels = annotation_object.label_image.copy()
+    previous_labels = label_annotation.label_image.copy()
 
 
     def update_annotator(event):
@@ -258,9 +273,10 @@ def annotator(imarray, annotation_object, plot_size=1024, invert_y=False, use_da
             return
 
         tab_object.loading = True
+        update_button.disabled = True
 
-        previous_labels = annotation_object.label_image.copy()
-        updated_labels = annotation_object.label_image.copy()
+        previous_labels = label_annotation.label_image.copy()
+        updated_labels = label_annotation.label_image.copy()
         for idx, a in enumerate(render_dict.keys()):
             if render_dict[a].data['xs']:
                 for o in range(len(render_dict[a].data['xs'])):
@@ -268,37 +284,26 @@ def annotator(imarray, annotation_object, plot_size=1024, invert_y=False, use_da
                     y = np.array(render_dict[a].data['ys'][o]).astype(int)
                     rr, cc = polygon(y, x)
                     inshape = np.where(
-                        np.array(annotation_object.label_image.shape[0] > rr) & np.array(0 < rr) & np.array(annotation_object.label_image.shape[1] > cc) & np.array(
+                        np.array(label_annotation.label_image.shape[0] > rr) & np.array(0 < rr) & np.array(label_annotation.label_image.shape[1] > cc) & np.array(
                             0 < cc))[0]
                     updated_labels[rr[inshape], cc[inshape]] = idx + 1
 
-        annotation_object.label_image = updated_labels
+        label_annotation.label_image = updated_labels
 
-        annotation = rgb_from_labels(annotation_object)
-
+        annotation = rgb_from_labels(label_annotation)
         annotation_c = annotation.astype('uint8').copy()
         if not invert_y:
             annotation_c = np.flip(annotation_c, 0)
 
-        anno = hv.RGB(annotation_c, bounds=(0, 0, annotation_c.shape[1], annotation_c.shape[0]))
-        if use_datashader:
-            anno = hd.regrid(anno)
-        ds_anno = (anno.
-                   options(aspect="equal", frame_height=int(plot_size),
-                           frame_width=int(plot_size), alpha=label_opacity.value).
-                   apply.opts(alpha=label_opacity.param.value))
+        updated_plot_list = create_images(annotation_c, imarray_c)
 
-        img = hv.RGB(imarray_c, bounds=(0, 0, imarray_c.shape[1], imarray_c.shape[0]))
-        if use_datashader:
-            img = hd.regrid(img)
-        ds_img = img.options(aspect="equal", frame_height=int(plot_size), frame_width=int(plot_size))
-
-        plot_list[0] = ds_img
-        plot_list[1] = ds_anno
+        plot_list[0] = updated_plot_list[0]
+        plot_list[1] = updated_plot_list[1]
         tab_object = pn.panel(hd.Overlay(plot_list).collate())
 
         p[1] = tab_object
         revert_button.disabled = False
+        update_button.disabled = False
 
     def revert_annotator(event):
         nonlocal tab_object, previous_labels, revert_button
@@ -307,33 +312,23 @@ def annotator(imarray, annotation_object, plot_size=1024, invert_y=False, use_da
             return
 
         tab_object.loading = True
+        update_button.disabled = True
 
-        annotation_object.label_image = previous_labels
-        annotation = rgb_from_labels(annotation_object)
-
+        label_annotation.label_image = previous_labels
+        annotation = rgb_from_labels(label_annotation)
         annotation_c = annotation.astype('uint8').copy()
         if not invert_y:
             annotation_c = np.flip(annotation_c, 0)
 
-        anno = hv.RGB(annotation_c, bounds=(0, 0, annotation_c.shape[1], annotation_c.shape[0]))
-        if use_datashader:
-            anno = hd.regrid(anno)
-        ds_anno = (anno.
-                   options(aspect="equal", frame_height=int(plot_size),
-                           frame_width=int(plot_size), alpha=label_opacity.value).
-                   apply.opts(alpha=label_opacity.param.value))
+        updated_plot_list = create_images(annotation_c, imarray_c)
 
-        img = hv.RGB(imarray_c, bounds=(0, 0, imarray_c.shape[1], imarray_c.shape[0]))
-        if use_datashader:
-            img = hd.regrid(img)
-        ds_img = img.options(aspect="equal", frame_height=int(plot_size), frame_width=int(plot_size))
-
-        plot_list[0] = ds_img
-        plot_list[1] = ds_anno
+        plot_list[0] = updated_plot_list[0]
+        plot_list[1] = updated_plot_list[1]
         tab_object = pn.panel(hd.Overlay(plot_list).collate())
 
         p[1] = tab_object
         revert_button.disabled = True
+        update_button.disabled = False
 
     pn.bind(update_annotator, update_button, watch=True)
     pn.bind(revert_annotator, revert_button, watch=True)
@@ -341,7 +336,7 @@ def annotator(imarray, annotation_object, plot_size=1024, invert_y=False, use_da
     return p
 
 
-def rgb_from_labels(annotation_object):
+def rgb_from_labels(label_annotation):
     """
     Helper function to plot from label images.
 
@@ -357,18 +352,17 @@ def rgb_from_labels(annotation_object):
     np.array
         Annotation image.
     """
-    labelimage_rgb = np.zeros((annotation_object.label_image.shape[0], annotation_object.label_image.shape[1], 4))
+    labelimage_rgb = np.zeros((label_annotation.label_image.shape[0], label_annotation.label_image.shape[1], 4))
 
-    colors = list(annotation_object.annotation_map.values())
-    for c in range(len(colors)):
-        color = ImageColor.getcolor(colors[c], "RGB")
-        labelimage_rgb[annotation_object.label_image == c + 1, 0:3] = np.array(color)
+    colours = list(label_annotation.annotation_map.values())
+    for c in range(len(colours)):
+        color = ImageColor.getcolor(colours[c], "RGBA")
+        labelimage_rgb[label_annotation.label_image == c + 1, 0:4] = np.array(color)
 
-    labelimage_rgb[:, :, 3] = 255
     return labelimage_rgb.astype('uint8')
 
 
-def sk_rf_classifier(im, annotation_object, plot=True):
+def sk_rf_classifier(im, label_annotation, plot=True):
     """
     A simple random forest pixel classifier from sklearn.
 
@@ -398,14 +392,16 @@ def sk_rf_classifier(im, annotation_object, plot=True):
     features = features_func(im)
     clf = RandomForestClassifier(n_estimators=50, n_jobs=-1,
                                  max_depth=10, max_samples=0.05)
-    clf = future.fit_segmenter(annotation_object.label_image, features, clf)
+    clf = future.fit_segmenter(label_annotation.label_image, features, clf)
 
-    annotation_object.label_image = future.predict_segmenter(features, clf)
+    trained_labels = LabelAnnotation(annotation_map=label_annotation.annotation_map)
+    trained_labels.label_image = future.predict_segmenter(features, clf)
 
     if plot:
-        labels_rgb = rgb_from_labels(annotation_object)
+        labels_rgb = rgb_from_labels(trained_labels)
         overlay_labels(im,labels_rgb,alpha=0.7)
 
+    return trained_labels
 
 def overlay_labels(im1, im2, alpha=0.8, show=True):
     """
@@ -439,7 +435,31 @@ def overlay_labels(im1, im2, alpha=0.8, show=True):
     return out_img
 
 
-def save_annotation(folder, file_name, annotation_object, ppm):
+def plot_labels(imarray, label_annotation, alpha=0.8, show=True):
+    """
+    Helper function to plot the labels on the image.
+
+    Parameters
+    ----------
+    imarray : array
+        Image to plot the labels on.
+    labels : array
+        Label image with pixel values corresponding to labels.
+    alpha : float, optional
+        Blending factor, by default 0.8.
+    show : bool, optional
+        If to show the merged plot or not, by default True.
+
+    Returns
+    -------
+    array
+        The merged image.
+    """
+
+    labels_rgb = rgb_from_labels(label_annotation)
+    return overlay_labels(imarray, labels_rgb, alpha, show)
+
+def save_annotation(folder, file_name, label_annotation, ppm):
     """
     Saves the annotated image as .tif and in addition saves the translation
     from annotations to labels in a pickle file.
@@ -459,10 +479,10 @@ def save_annotation(folder, file_name, annotation_object, ppm):
     ppm : float
         Pixels per microns.
     """
-    anno_names = list(annotation_object.annotation_map.keys())
-    anno_colors = list(annotation_object.annotation_map.values())
+    anno_names = list(label_annotation.annotation_map.keys())
+    anno_colors = list(label_annotation.annotation_map.values())
 
-    label_image = Image.fromarray(annotation_object.label_image)
+    label_image = Image.fromarray(label_annotation.label_image)
     label_image.save(folder + file_name + '.tif')
     with open(folder + file_name + '.pickle', 'wb') as handle:
         pickle.dump(dict(zip(range(1, len(anno_names) + 1), anno_names)), handle, protocol=pickle.HIGHEST_PROTOCOL)
@@ -492,7 +512,7 @@ def load_annotation(folder, file_name, load_colors=False):
         Returns annotation image, annotation order, pixels per microns, and annotation color.
         If `load_colors` is False, annotation color is not returned.
     """
-    #TODO: change output type to annotation_object
+    #TODO: change output type to label_annotation
 
     imP = Image.open(folder + file_name + '.tif')
 
@@ -520,7 +540,8 @@ def load_annotation(folder, file_name, load_colors=False):
         return im, anno_order, ppm['ppm']
 
 
-def segmenter(imarray, annotation_object, plot_size=1024, use_datashader=False, alpha=0.7, invert_y=False):
+def segmenter(imarray, label_annotation, plot_size=1024, use_datashader=False, invert_y=False,
+              annotation_prefix="object"):
     """
     Interactive annotation tool with line annotations using Panel tabs for toggling between morphology and annotation.
     The principle is that selecting closed/semiclosed shaped that will later be filled according to the proper annotation.
@@ -546,9 +567,17 @@ def segmenter(imarray, annotation_object, plot_size=1024, use_datashader=False, 
         Dictionary containing the Bokeh renderers for the annotation lines.
     """
 
+    if label_annotation.label_image is None:
+        label_image = np.zeros((imarray.shape[0], imarray.shape[1]), dtype=np.uint8)
+        label_annotation.label_image = label_image
+        label_annotation.annotation_map = OrderedDict({})
+        annotation = rgb_from_labels(LabelAnnotation(label_image=label_image,
+                                                     annotation_map=label_annotation.annotation_map))
+    else:
+        annotation = rgb_from_labels(label_annotation)
+
     # convert label image to rgb for annotation
-    labels_rgb = rgb_from_labels(annotation_object)
-    annotation = overlay_labels(imarray,labels_rgb, alpha=alpha,show=False)
+    annotation = rgb_from_labels(label_annotation)
 
     annotation_c = annotation.astype('uint8').copy()
     if not invert_y:
@@ -558,120 +587,134 @@ def segmenter(imarray, annotation_object, plot_size=1024, use_datashader=False, 
     if not invert_y:
         imarray_c = np.flip(imarray_c, 0)
 
-    # Create new holoview images
-    anno = hv.RGB(annotation_c, bounds=(0, 0, annotation_c.shape[1], annotation_c.shape[0]))
-    if use_datashader:
-        anno = hd.regrid(anno)
-    ds_anno = anno.options(aspect="equal", frame_height=int(plot_size), frame_width=int(plot_size))
-
-    img = hv.RGB(imarray_c, bounds=(0, 0, imarray_c.shape[1], imarray_c.shape[0]))
-    if use_datashader:
-        img = hd.regrid(img)
-    ds_img = img.options(aspect="equal", frame_height=int(plot_size), frame_width=int(plot_size))
-
-    anno_tab_plot_list = [ds_anno]
-    img_tab_plot_list = [ds_img]
-
-    render_dict = {}
-    path_dict = {}
-    for key in annotation_object.annotation_map.keys():
-        path_dict[key] = hv.Path([]).opts(color=annotation_object.annotation_map[key], line_width=3, line_alpha=0.6)
-        render_dict[key] = CustomPolyDraw(source=path_dict[key], num_objects=300, tooltip=key,
-                                          icon_colour=annotation_object.annotation_map[key])
-
-        anno_tab_plot_list.append(path_dict[key])
-
     update_button = pn.widgets.Button(name='Update', button_type='primary')
     revert_button = pn.widgets.Button(name='Revert', button_type='danger', disabled=True)
-    tab_object = pn.Tabs(("Annotation", hd.Overlay(anno_tab_plot_list).collate()),
-                         ("Image", hd.Overlay(img_tab_plot_list).collate()), dynamic=False)
+    label_opacity = pn.widgets.FloatSlider(name='Label overlay', value=0.5, start=0, end=1, step=0.1)
+
+    def create_images(annotation_c=annotation_c, imarray_c=imarray_c):
+        # Create new holoview images
+        anno = hv.RGB(annotation_c, bounds=(0, 0, annotation_c.shape[1], annotation_c.shape[0]))
+        if use_datashader:
+            anno = hd.regrid(anno)
+        ds_anno = (anno.
+                   options(aspect="equal", frame_height=int(plot_size),
+                           frame_width=int(plot_size), alpha=label_opacity.value).
+                   apply.opts(alpha=label_opacity.param.value))
+        ds_anno.opts(backend_opts={"plot.toolbar_location": "left"})
+
+        img = hv.RGB(imarray_c, bounds=(0, 0, imarray_c.shape[1], imarray_c.shape[0]))
+        if use_datashader:
+            img = hd.regrid(img)
+        ds_img = img.options(aspect="equal", frame_height=int(plot_size), frame_width=int(plot_size))
+
+        return [ds_img, ds_anno]
+
+    plot_list = create_images()
+
+    path_object = hv.Path([]).opts(line_width=3, line_alpha=0.7)
+    draw_object = hv.streams.PolyDraw(source=path_object, show_vertices=True, num_objects=300, drag=True)
+    edit_object = hv.streams.PolyEdit(source=path_object, vertex_style={'color': 'red'}, shared=True)
+    plot_list.append(path_object)
+
+    erase_path_object = hv.Path([]).opts(line_width=3, line_alpha=1, line_color="black")
+    erase_object = CustomPolyDraw(source=erase_path_object, num_objects=300, show_vertices=True, drag=True,
+                                             tooltip="Eraser", vertex_style={'color': 'black'})
+    edit_erase_object = hv.streams.PolyEdit(source=erase_path_object, shared=True)
+    plot_list.append(erase_path_object)
+
+    tab_object = pn.panel(hd.Overlay(plot_list).collate())
     # Create the tabbed view
-    p = pn.Column(pn.Row(update_button, revert_button), tab_object)
+    p = pn.Column(pn.Row(label_opacity, update_button, revert_button), tab_object)
 
-    previous_labels = annotation_object.label_image.copy()
+    previous_label = label_annotation.label_image
+    previous_annotation_map = label_annotation.annotation_map
 
-    def update_object_annotator(event):
-        nonlocal tab_object, previous_labels, revert_button
+    def update_segmenter(event):
+        nonlocal tab_object, previous_label, previous_annotation_map, revert_button
 
         if not event:
             return
 
         tab_object.loading = True
+        update_button.disabled = True
 
         colorpool = ['green', 'cyan', 'brown', 'magenta', 'blue', 'red', 'orange']
-        object_dict = {'unassigned': 'yellow'}
 
-        previous_labels = annotation_object.label_image.copy()
-        updated_labels = annotation_object.label_image.copy()
-        updated_labels[:] = 1
-        for idx, a in enumerate(render_dict.keys()):
-            if render_dict[a].data['xs']:
-                print(a)
-                for o in range(len(render_dict[a].data['xs'])):
-                    x = np.array(render_dict[a].data['xs'][o]).astype(int)
-                    y = np.array(render_dict[a].data['ys'][o]).astype(int)
-                    rr, cc = polygon(y, x)
-                    inshape = (annotation_object.label_image.shape[0] > rr) & (0 < rr) & (annotation_object.label_image.shape[1] > cc) & (
-                                0 < cc)  # make sure pixels outside the image are ignored
-                    updated_labels[rr[inshape], cc[inshape]] = o + 2
-                    object_dict[a + '_' + str(o)] = random.choice(colorpool)
+        previous_label = label_annotation.label_image.copy()
+        previous_annotation_map = label_annotation.annotation_map.copy()
 
-        annotation_object.label_image = updated_labels
+        existing_object_count = len(label_annotation.annotation_map.keys()) + 1
+        print(existing_object_count)
+        if erase_object.data['xs']:
+            print("Erasing")
+            for o in range(len(erase_object.data['xs'])):
+                x = np.array(erase_object.data['xs'][o]).astype(int)
+                y = np.array(erase_object.data['ys'][o]).astype(int)
+                rr, cc = polygon(y, x)
+                inshape = (label_annotation.label_image.shape[0] > rr) & (0 < rr) & (label_annotation.label_image.shape[1] > cc) & (
+                            0 < cc)  # make sure pixels outside the image are ignored
+                label_annotation.label_image[rr[inshape], cc[inshape]] = 0
 
-        labels_rgb = rgb_from_labels(annotation_object)
-        annotation = overlay_labels(imarray, labels_rgb, alpha=alpha, show=False)
+        if draw_object.data['xs']:
+            print("Updating")
+            for o in range(len(draw_object.data['xs'])):
+                x = np.array(draw_object.data['xs'][o]).astype(int)
+                y = np.array(draw_object.data['ys'][o]).astype(int)
+                rr, cc = polygon(y, x)
+                inshape = (label_annotation.label_image.shape[0] > rr) & (0 < rr) & (label_annotation.label_image.shape[1] > cc) & (
+                            0 < cc)  # make sure pixels outside the image are ignored
+                label_annotation.label_image[rr[inshape], cc[inshape]] = existing_object_count + o
+                label_annotation.annotation_map[annotation_prefix + '_' + str(existing_object_count+o)] = (
+                    random.choice(colorpool))
 
+        annotation = rgb_from_labels(label_annotation)
         annotation_c = annotation.astype('uint8').copy()
         if not invert_y:
             annotation_c = np.flip(annotation_c, 0)
 
-        anno = hv.RGB(annotation_c, bounds=(0, 0, annotation_c.shape[1], annotation_c.shape[0]))
-        if use_datashader:
-            anno = hd.regrid(anno)
-        ds_anno = anno.options(aspect="equal", frame_height=int(plot_size), frame_width=int(plot_size))
+        updated_plot_list = create_images(annotation_c, imarray_c)
 
-        anno_tab_plot_list[0] = ds_anno
-        tab_object = pn.Tabs(("Annotation", hd.Overlay(anno_tab_plot_list).collate()),
-                             ("Image", hd.Overlay(img_tab_plot_list).collate()), dynamic=False)
+        plot_list[0] = updated_plot_list[0]
+        plot_list[1] = updated_plot_list[1]
+        tab_object = pn.panel(hd.Overlay(plot_list).collate())
 
         p[1] = tab_object
         revert_button.disabled = False
+        update_button.disabled = False
 
-    def revert_object_annotator(event):
-        nonlocal tab_object, previous_labels, revert_button
+    def revert_segmenter(event):
+        nonlocal tab_object, previous_label, previous_annotation_map, revert_button
 
         if not event:
             return
 
         tab_object.loading = True
 
-        annotation_object.label_image = previous_labels
-        labels_rgb = rgb_from_labels(annotation_object)
-        annotation = overlay_labels(imarray, labels_rgb, alpha=alpha, show=False)
+        label_annotation.label_image = previous_label.copy()
+        label_annotation.annotation_map = previous_annotation_map.copy()
 
+        annotation = rgb_from_labels(label_annotation)
         annotation_c = annotation.astype('uint8').copy()
         if not invert_y:
             annotation_c = np.flip(annotation_c, 0)
 
-        anno = hv.RGB(annotation_c, bounds=(0, 0, annotation_c.shape[1], annotation_c.shape[0]))
-        if use_datashader:
-            anno = hd.regrid(anno)
-        ds_anno = anno.options(aspect="equal", frame_height=int(plot_size), frame_width=int(plot_size))
+        updated_plot_list = create_images(annotation_c, imarray_c)
 
-        anno_tab_plot_list[0] = ds_anno
-        tab_object = pn.Tabs(("Annotation", hd.Overlay(anno_tab_plot_list).collate()),
-                             ("Image", hd.Overlay(img_tab_plot_list).collate()), dynamic=False)
+        plot_list[0] = updated_plot_list[0]
+        plot_list[1] = updated_plot_list[1]
+        tab_object = pn.panel(hd.Overlay(plot_list).collate())
 
         p[1] = tab_object
         revert_button.disabled = True
+        update_button.disabled = False
 
-    pn.bind(update_object_annotator, update_button, watch=True)
-    pn.bind(revert_object_annotator, revert_button, watch=True)
+    pn.bind(update_segmenter, update_button, watch=True)
+    pn.bind(revert_segmenter, revert_button, watch=True)
 
     return p
 
 
-def gene_labels(path, df, gene_markers, annotation_object, r,every_x_spots = 100):
+def gene_labels(path, df, gene_markers, imarray, label_annotation, r, every_x_spots = 101, unassigned_colour="yellow"):
     """
     Assign labels to training spots based on gene expression.
 
@@ -694,15 +737,28 @@ def gene_labels(path, df, gene_markers, annotation_object, r,every_x_spots = 100
 
     Returns
     -------
-    numpy.ndarray
-        Array containing the training labels.
+    LabelAnnotation
+        LabelAnnotation object containing the training label.
     """
+
+    if label_annotation.label_image is not None:
+        raise ValueError("Label image is not empty. Please provide a label_annotation object with empty label_image.")
+
+    if label_annotation.annotation_map is None:
+        raise ValueError("Annotation map is missing. Please provide annotation map.")
+    else:
+        label_annotation.annotation_map = OrderedDict(label_annotation.annotation_map)
+        label_annotation.annotation_map["unassigned"] = unassigned_colour
+        label_annotation.annotation_map.move_to_end("unassigned", last=False)
+
+    label_image = np.zeros((imarray.shape[0], imarray.shape[1]), dtype=np.uint8)
+    label_annotation.label_image = label_image
 
     import scanpy
     adata = scanpy.read_visium(path,count_file='raw_feature_bc_matrix.h5')
     adata = adata[df.index.intersection(adata.obs.index)]
     coordinates = np.array(df.loc[:,['pxl_col','pxl_row']])
-    labels = background_labels(annotation_object.label_image.shape[:2], coordinates.T, every_x_spots = 101, r=r)
+    labels = background_labels(label_annotation.label_image.shape[:2], coordinates.T, every_x_spots=every_x_spots, r=r)
 
     for m in list(gene_markers.keys()):
         print(gene_markers[m])
@@ -711,13 +767,15 @@ def gene_labels(path, df, gene_markers, annotation_object, r,every_x_spots = 100
         GeneData = adata.X[:, GeneIndex].todense()
         SortedExp = np.argsort(GeneData, axis=0)[::-1]
         list_gene = adata.obs.index[np.array(np.squeeze(SortedExp[range(gene_markers[m][1])]))[0]]
-        for idx, sub in enumerate(list(annotation_object.annotation_map.keys())):
+        for idx, sub in enumerate(list(label_annotation.annotation_map.keys())):
             if sub == m:
                 back = idx
         for coor in df.loc[list_gene, ['pxl_row','pxl_col']].to_numpy():
             labels[disk((coor[0], coor[1]), r)] = back + 1
 
-    annotation_object.label_image = labels
+    label_annotation.label_image = labels
+
+    return label_annotation
 
 
 def background_labels(shape, coordinates, r, every_x_spots=10, label=1):
