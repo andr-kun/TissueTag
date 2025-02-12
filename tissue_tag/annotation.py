@@ -423,6 +423,9 @@ def overlay_labels(im1, im2, alpha=0.8, show=True):
     array
         The merged image.
     """
+    # Ensure `im1` has 4 channels if im2 has 4 channels
+    if im2.shape[-1] == 4:
+        im1 = np.dstack([im1, np.full((*im1.shape[:2], 1), 255, dtype=im1.dtype)])  # Convert im1 to RGBA
 
     #generate overlay image
     plt.rcParams["figure.figsize"] = [10, 10]
@@ -700,6 +703,87 @@ def segmenter(imarray, label_annotation, plot_size=1024, use_datashader=False, i
 
     return p
 
+def gene_labels_from_adata(adata, df, gene_markers, imarray, label_annotation, r, every_x_spots=101, unassigned_colour="yellow"):
+    """
+    Assign labels to training spots based on gene expression from an existing AnnData object.
+
+    Parameters
+    ----------
+    adata : AnnData
+        Pre-loaded AnnData object containing gene expression data.
+    df : pandas.DataFrame
+        DataFrame containing spot coordinates.
+    gene_markers : dict
+        Dictionary mapping markers to genes.
+    imarray : np.ndarray
+        Image to overlay labels onto.
+    label_annotation : LabelAnnotation
+        Object storing label image and annotation map.
+    r : float
+        Radius of the spots.
+    every_x_spots : int, optional
+        Spacing between background labels. Higher value means fewer spots. Default is 101.
+    unassigned_colour : str, optional
+        Color for unassigned labels. Default is "yellow".
+
+    Returns
+    -------
+    LabelAnnotation
+        Updated LabelAnnotation object containing the training labels.
+    """
+
+    if label_annotation.label_image is not None:
+        print("Label image is not empty. Will replace with an empty label_image.")
+
+    if label_annotation.annotation_map is None:
+        raise ValueError("Annotation map is missing. Please provide an annotation map.")
+    else:
+        label_annotation.annotation_map = OrderedDict(label_annotation.annotation_map)
+        label_annotation.annotation_map["unassigned"] = unassigned_colour
+        label_annotation.annotation_map.move_to_end("unassigned", last=False)
+
+    # Initialize label image
+    label_image = np.zeros((imarray.shape[0], imarray.shape[1]), dtype=np.uint8)
+    label_annotation.label_image = label_image
+
+    # Filter adata to match df indices
+    adata = adata[df.index.intersection(adata.obs.index)]
+
+    # Extract coordinates
+    coordinates = np.array(df.loc[:, ["pxl_col", "pxl_row"]])
+    labels = background_labels(label_annotation.label_image.shape[:2], coordinates.T, every_x_spots=every_x_spots, r=r)
+
+    # Assign labels based on gene expression
+    for marker, (gene, top_n) in gene_markers.items():
+        print(f"Processing marker: {marker}, Gene: {gene}")
+
+        GeneIndex = np.where(adata.var_names.str.fullmatch(gene))[0]
+        if GeneIndex.size == 0:
+            print(f"Warning: Gene {gene} not found in AnnData. Skipping.")
+            continue
+
+        # Normalize gene expression
+        from scanpy.pp import normalize_total
+        normalize_total(adata)
+
+        # Extract gene expression data
+        GeneData = adata.X[:, GeneIndex].todense()
+        SortedExp = np.argsort(GeneData, axis=0)[::-1]  # Sort in descending order
+
+        # Select top N spots based on gene expression
+        list_gene = adata.obs.index[np.array(np.squeeze(SortedExp[:top_n]))[0]]
+
+        # Assign labels
+        for idx, sub in enumerate(label_annotation.annotation_map.keys()):
+            if sub == marker:
+                label_value = idx
+
+        for coor in df.loc[list_gene, ["pxl_row", "pxl_col"]].to_numpy():
+            labels[disk((coor[0], coor[1]), r)] = label_value + 1
+
+    label_annotation.label_image = labels
+
+    return label_annotation
 
 def gene_labels(path, df, gene_markers, imarray, label_annotation, r, every_x_spots = 101, unassigned_colour="yellow"):
     """
