@@ -706,7 +706,7 @@ def anno_to_grid(folder, file_name, spot_to_spot):
         annotation_object.label_image,
         [annotation_object.label_image,],
         [file_name],
-        [annotation_object.annotation_map.keys()],
+        [{i+1: v for i, v in enumerate(annotation_object.annotation_map.keys())}],
         spot_to_spot,
         ppm,
         1,
