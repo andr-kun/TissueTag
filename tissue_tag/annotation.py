@@ -424,8 +424,8 @@ def overlay_labels(im1, im2, alpha=0.8, show=True):
         The merged image.
     """
     # Ensure `im1` has 4 channels if im2 has 4 channels
-    if im2.shape[-1] == 4:
-        im1 = np.dstack([im1, np.full((*im1.shape[:2], 1), 255, dtype=im1.dtype)])  # Convert im1 to RGBA
+    # if im2.shape[-1] == 4:
+    #     im1 = np.dstack([im1, np.full((*im1.shape[:2], 1), 255, dtype=im1.dtype)])  # Convert im1 to RGBA
 
     #generate overlay image
     plt.rcParams["figure.figsize"] = [10, 10]
