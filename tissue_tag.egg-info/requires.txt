@@ -1,0 +1,14 @@
+opencv-python
+Pillow
+bokeh
+jupyter-bokeh
+matplotlib
+seaborn
+scipy
+scikit-image
+tqdm
+scikit-learn
+holoviews
+datashader
+panel==1.4.5
+jupyterlab

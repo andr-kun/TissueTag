@@ -1,0 +1,11 @@
+LICENSE
+README.md
+setup.py
+tissue_tag/__init__.py
+tissue_tag/annotation.py
+tissue_tag/tissue_tag.py
+tissue_tag.egg-info/PKG-INFO
+tissue_tag.egg-info/SOURCES.txt
+tissue_tag.egg-info/dependency_links.txt
+tissue_tag.egg-info/requires.txt
+tissue_tag.egg-info/top_level.txt
