@@ -153,6 +153,7 @@ SynchronisedFreehandDrawLink.register_callback('bokeh', SynchronisedFreehandDraw
 class LabelAnnotation:
     label_image: Optional[np.array] = None
     annotation_map: Optional[dict] = None
+    # ppm: Optional[float] = None  # andr - we need to add this to the save_annotation function. generally speaking i think the annotation object needs to be generated at the point the image is loaded
 
 
 def to_base64(img):
