@@ -1,11 +1,7 @@
 import base64
-import copy
-import pickle
 import random
-from dataclasses import dataclass
 from functools import partial
 from io import BytesIO
-from typing import Optional
 from collections import OrderedDict
 
 import bokeh
@@ -22,6 +18,9 @@ from packaging import version
 from skimage import feature, future
 from skimage.draw import polygon, disk
 from sklearn.ensemble import RandomForestClassifier
+
+import tissue_tag.io
+from tissue_tag.io import TissueTagAnnotation
 
 hv.extension('bokeh')
 
@@ -149,12 +148,6 @@ hv.plotting.bokeh.callbacks.Stream._callbacks['bokeh'].update({
 # Register the callback class to the link class
 SynchronisedFreehandDrawLink.register_callback('bokeh', SynchronisedFreehandDrawCallback)
 
-@dataclass
-class LabelAnnotation:
-    label_image: Optional[np.array] = None
-    annotation_map: Optional[dict] = None
-
-
 def to_base64(img):
     buffered = BytesIO()
     img.save(buffered, format="png")
@@ -174,7 +167,7 @@ def create_icon(name, color):
 
 # Annotation functions
 
-def annotator(imarray, label_annotation, plot_size=1024, invert_y=False, use_datashader=False,
+def annotator(tissue_tag_annotation, plot_size=1024, invert_y=False, use_datashader=False,
               unassigned_colour="yellow"):
     """
     Interactive annotation tool with line annotations using Panel tabs for toggling between morphology and annotation.
@@ -204,25 +197,28 @@ def annotator(imarray, label_annotation, plot_size=1024, invert_y=False, use_dat
     import logging
     logging.getLogger('bokeh.core.validation.check').setLevel(logging.ERROR)
 
-    if label_annotation.annotation_map is None:
+    if tissue_tag_annotation.annotation_map is None:
         raise ValueError("Annotation map is missing. Please provide annotation map.")
     else:
-        label_annotation.annotation_map = OrderedDict(label_annotation.annotation_map)
-        label_annotation.annotation_map["unassigned"] = unassigned_colour
-        label_annotation.annotation_map.move_to_end("unassigned", last=False)
+        tissue_tag_annotation.annotation_map = OrderedDict(tissue_tag_annotation.annotation_map)
+        tissue_tag_annotation.annotation_map["unassigned"] = unassigned_colour
+        tissue_tag_annotation.annotation_map.move_to_end("unassigned", last=False)
 
-    if label_annotation.label_image is None:
-        label_image = np.zeros((imarray.shape[0], imarray.shape[1]), dtype=np.uint8)
-        label_annotation.label_image = label_image
-        annotation = rgb_from_labels(LabelAnnotation(label_image=label_image, annotation_map={'default': '#00000000'}))
+    if tissue_tag_annotation.label_image is None:
+        label_image = np.zeros((tissue_tag_annotation.image.shape[0], tissue_tag_annotation.image.shape[1]), dtype=np.uint8)
+        tissue_tag_annotation.label_image = label_image
+        provided_annotation_map = tissue_tag_annotation.annotation_map.copy()
+        tissue_tag_annotation.annotation_map = {'default': '#00000000'}
+        annotation = rgb_from_labels(tissue_tag_annotation)
+        tissue_tag_annotation.annotation_map = provided_annotation_map
     else:
-        annotation = rgb_from_labels(label_annotation)
+        annotation = rgb_from_labels(tissue_tag_annotation)
 
     annotation_c = annotation.astype('uint8').copy()
     if not invert_y:
         annotation_c = np.flip(annotation_c, 0)
 
-    imarray_c = imarray.astype('uint8').copy()
+    imarray_c = tissue_tag_annotation.image.astype('uint8').copy()
     if not invert_y:
         imarray_c = np.flip(imarray_c, 0)
 
@@ -252,10 +248,10 @@ def annotator(imarray, label_annotation, plot_size=1024, invert_y=False, use_dat
 
     render_dict = {}
     path_dict = {}
-    for key in label_annotation.annotation_map.keys():
-        path_dict[key] = hv.Path([]).opts(color=label_annotation.annotation_map[key], line_width=5, line_alpha=0.7)
+    for key in tissue_tag_annotation.annotation_map.keys():
+        path_dict[key] = hv.Path([]).opts(color=tissue_tag_annotation.annotation_map[key], line_width=5, line_alpha=0.7)
         render_dict[key] = CustomFreehandDraw(source=path_dict[key], num_objects=200, tooltip=key,
-                                              icon_colour=label_annotation.annotation_map[key])
+                                              icon_colour=tissue_tag_annotation.annotation_map[key])
 
         plot_list.append(path_dict[key])
 
@@ -263,7 +259,7 @@ def annotator(imarray, label_annotation, plot_size=1024, invert_y=False, use_dat
     # Create the tabbed view
     p = pn.Column(pn.Row(label_opacity, update_button, revert_button), tab_object)
 
-    previous_labels = label_annotation.label_image.copy()
+    previous_labels = tissue_tag_annotation.label_image.copy()
 
 
     def update_annotator(event):
@@ -275,8 +271,8 @@ def annotator(imarray, label_annotation, plot_size=1024, invert_y=False, use_dat
         tab_object.loading = True
         update_button.disabled = True
 
-        previous_labels = label_annotation.label_image.copy()
-        updated_labels = label_annotation.label_image.copy()
+        previous_labels = tissue_tag_annotation.label_image.copy()
+        updated_labels = tissue_tag_annotation.label_image.copy()
         for idx, a in enumerate(render_dict.keys()):
             if render_dict[a].data['xs']:
                 for o in range(len(render_dict[a].data['xs'])):
@@ -284,13 +280,13 @@ def annotator(imarray, label_annotation, plot_size=1024, invert_y=False, use_dat
                     y = np.array(render_dict[a].data['ys'][o]).astype(int)
                     rr, cc = polygon(y, x)
                     inshape = np.where(
-                        np.array(label_annotation.label_image.shape[0] > rr) & np.array(0 < rr) & np.array(label_annotation.label_image.shape[1] > cc) & np.array(
+                        np.array(tissue_tag_annotation.label_image.shape[0] > rr) & np.array(0 < rr) & np.array(tissue_tag_annotation.label_image.shape[1] > cc) & np.array(
                             0 < cc))[0]
                     updated_labels[rr[inshape], cc[inshape]] = idx + 1
 
-        label_annotation.label_image = updated_labels
+        tissue_tag_annotation.label_image = updated_labels
 
-        annotation = rgb_from_labels(label_annotation)
+        annotation = rgb_from_labels(tissue_tag_annotation)
         annotation_c = annotation.astype('uint8').copy()
         if not invert_y:
             annotation_c = np.flip(annotation_c, 0)
@@ -314,8 +310,8 @@ def annotator(imarray, label_annotation, plot_size=1024, invert_y=False, use_dat
         tab_object.loading = True
         update_button.disabled = True
 
-        label_annotation.label_image = previous_labels
-        annotation = rgb_from_labels(label_annotation)
+        tissue_tag_annotation.label_image = previous_labels
+        annotation = rgb_from_labels(tissue_tag_annotation)
         annotation_c = annotation.astype('uint8').copy()
         if not invert_y:
             annotation_c = np.flip(annotation_c, 0)
@@ -336,7 +332,7 @@ def annotator(imarray, label_annotation, plot_size=1024, invert_y=False, use_dat
     return p
 
 
-def rgb_from_labels(label_annotation):
+def rgb_from_labels(tissue_tag_annotation):
     """
     Helper function to plot from label images.
 
@@ -352,17 +348,17 @@ def rgb_from_labels(label_annotation):
     np.array
         Annotation image.
     """
-    labelimage_rgb = np.zeros((label_annotation.label_image.shape[0], label_annotation.label_image.shape[1], 4))
+    labelimage_rgb = np.zeros((tissue_tag_annotation.label_image.shape[0], tissue_tag_annotation.label_image.shape[1], 4))
 
-    colours = list(label_annotation.annotation_map.values())
+    colours = list(tissue_tag_annotation.annotation_map.values())
     for c in range(len(colours)):
         color = ImageColor.getcolor(colours[c], "RGBA")
-        labelimage_rgb[label_annotation.label_image == c + 1, 0:4] = np.array(color)
+        labelimage_rgb[tissue_tag_annotation.label_image == c + 1, 0:4] = np.array(color)
 
     return labelimage_rgb.astype('uint8')
 
 
-def sk_rf_classifier(im, label_annotation, plot=True):
+def sk_rf_classifier(tissue_tag_annotation, plot=True):
     """
     A simple random forest pixel classifier from sklearn.
 
@@ -389,19 +385,18 @@ def sk_rf_classifier(im, label_annotation, plot=True):
                             intensity=True, edges=False, texture=~True,
                             sigma_min=sigma_min, sigma_max=sigma_max, channel_axis=-1)
 
-    features = features_func(im)
+    features = features_func(tissue_tag_annotation.image)
     clf = RandomForestClassifier(n_estimators=50, n_jobs=-1,
                                  max_depth=10, max_samples=0.05)
-    clf = future.fit_segmenter(label_annotation.label_image, features, clf)
+    clf = future.fit_segmenter(tissue_tag_annotation.label_image, features, clf)
 
-    trained_labels = LabelAnnotation(annotation_map=label_annotation.annotation_map)
-    trained_labels.label_image = future.predict_segmenter(features, clf)
+    tissue_tag_annotation.label_image = future.predict_segmenter(features, clf)
 
     if plot:
-        labels_rgb = rgb_from_labels(trained_labels)
-        overlay_labels(im,labels_rgb,alpha=0.7)
+        labels_rgb = rgb_from_labels(tissue_tag_annotation)
+        overlay_labels(tissue_tag_annotation.image,labels_rgb,alpha=0.7)
 
-    return trained_labels
+    return tissue_tag_annotation
 
 def overlay_labels(im1, im2, alpha=0.8, show=True):
     """
@@ -438,7 +433,7 @@ def overlay_labels(im1, im2, alpha=0.8, show=True):
     return out_img
 
 
-def plot_labels(imarray, label_annotation, alpha=0.8, show=True):
+def plot_labels(tissue_tag_annotation, alpha=0.8, show=True):
     """
     Helper function to plot the labels on the image.
 
@@ -459,78 +454,11 @@ def plot_labels(imarray, label_annotation, alpha=0.8, show=True):
         The merged image.
     """
 
-    labels_rgb = rgb_from_labels(label_annotation)
-    return overlay_labels(imarray, labels_rgb, alpha, show)
-
-def save_annotation(folder, file_name, label_annotation, ppm):
-    """
-    Saves the annotated image as .tif and in addition saves the translation
-    from annotations to labels in a pickle file.
-
-    Parameters
-    ----------
-    folder : str
-        Folder where to save the annotations.
-    label_image : numpy.ndarray
-        Labeled image.
-    file_name : str
-        Name for tif image and pickle.
-    anno_names : list
-        Names of annotated objects.
-    anno_colors : list
-        Colors of annotated objects.
-    ppm : float
-        Pixels per microns.
-    """
-
-    label_image = Image.fromarray(label_annotation.label_image)
-    label_image.save(folder + file_name + '.tif')
-    with open(folder + file_name + '.pickle', 'wb') as handle:
-        pickle.dump(label_annotation.annotation_map, handle, protocol=pickle.HIGHEST_PROTOCOL)
-    with open(folder + file_name + '_ppm.pickle', 'wb') as handle:
-        pickle.dump({'ppm': ppm}, handle, protocol=pickle.HIGHEST_PROTOCOL)
+    labels_rgb = rgb_from_labels(tissue_tag_annotation)
+    return overlay_labels(tissue_tag_annotation.image, labels_rgb, alpha, show)
 
 
-def load_annotation(folder, file_name):
-    """
-    Loads the annotated image from a .tif file and the translation from annotations
-    to labels from a pickle file.
-
-    Parameters
-    ----------
-    folder : str
-        Folder path for annotations.
-    file_name : str
-        Name for tif image and pickle without extensions.
-    load_colors : bool, optional
-        If True, get original colors used for annotations. Default is False.
-
-    Returns
-    -------
-    tuple
-        Returns annotation image, annotation order, pixels per microns, and annotation color.
-        If `load_colors` is False, annotation color is not returned.
-    """
-
-    imP = Image.open(folder + file_name + '.tif')
-
-    ppm = imP.info['resolution'][0]
-    im = np.array(imP)
-
-    print(f'loaded annotation image - {file_name} size - {str(im.shape)}')
-    with open(folder + file_name + '.pickle', 'rb') as handle:
-        annotation_map = pickle.load(handle)
-        print('loaded annotation map')
-        print(annotation_map)
-    with open(folder + file_name + '_ppm.pickle', 'rb') as handle:
-        ppm = pickle.load(handle)
-        print('loaded ppm')
-        print(ppm)
-
-    return LabelAnnotation(im, annotation_map), ppm['ppm']
-
-
-def segmenter(imarray, label_annotation, plot_size=1024, use_datashader=False, invert_y=False,
+def segmenter(tissue_tag_annotation, plot_size=1024, use_datashader=False, invert_y=False,
               annotation_prefix="object"):
     """
     Interactive annotation tool with line annotations using Panel tabs for toggling between morphology and annotation.
@@ -557,23 +485,19 @@ def segmenter(imarray, label_annotation, plot_size=1024, use_datashader=False, i
         Dictionary containing the Bokeh renderers for the annotation lines.
     """
 
-    if label_annotation.label_image is None:
-        label_image = np.zeros((imarray.shape[0], imarray.shape[1]), dtype=np.uint8)
-        label_annotation.label_image = label_image
-        label_annotation.annotation_map = OrderedDict({})
-        annotation = rgb_from_labels(LabelAnnotation(label_image=label_image,
-                                                     annotation_map=label_annotation.annotation_map))
-    else:
-        annotation = rgb_from_labels(label_annotation)
+    if tissue_tag_annotation.label_image is None:
+        label_image = np.zeros((tissue_tag_annotation.image.shape[0], tissue_tag_annotation.image.shape[1]), dtype=np.uint8)
+        tissue_tag_annotation.label_image = label_image
+        tissue_tag_annotation.annotation_map = OrderedDict({})
 
     # convert label image to rgb for annotation
-    annotation = rgb_from_labels(label_annotation)
+    annotation = rgb_from_labels(tissue_tag_annotation)
 
     annotation_c = annotation.astype('uint8').copy()
     if not invert_y:
         annotation_c = np.flip(annotation_c, 0)
 
-    imarray_c = imarray.astype('uint8').copy()
+    imarray_c = tissue_tag_annotation.image.astype('uint8').copy()
     if not invert_y:
         imarray_c = np.flip(imarray_c, 0)
 
@@ -616,8 +540,8 @@ def segmenter(imarray, label_annotation, plot_size=1024, use_datashader=False, i
     # Create the tabbed view
     p = pn.Column(pn.Row(label_opacity, update_button, revert_button), tab_object)
 
-    previous_label = label_annotation.label_image
-    previous_annotation_map = label_annotation.annotation_map
+    previous_label = tissue_tag_annotation.label_image
+    previous_annotation_map = tissue_tag_annotation.annotation_map
 
     def update_segmenter(event):
         nonlocal tab_object, previous_label, previous_annotation_map, revert_button
@@ -630,10 +554,10 @@ def segmenter(imarray, label_annotation, plot_size=1024, use_datashader=False, i
 
         colorpool = ['green', 'cyan', 'brown', 'magenta', 'blue', 'red', 'orange']
 
-        previous_label = label_annotation.label_image.copy()
-        previous_annotation_map = label_annotation.annotation_map.copy()
+        previous_label = tissue_tag_annotation.label_image.copy()
+        previous_annotation_map = tissue_tag_annotation.annotation_map.copy()
 
-        existing_object_count = len(label_annotation.annotation_map.keys()) + 1
+        existing_object_count = len(tissue_tag_annotation.annotation_map.keys()) + 1
         print(existing_object_count)
         if erase_object.data['xs']:
             print("Erasing")
@@ -641,9 +565,9 @@ def segmenter(imarray, label_annotation, plot_size=1024, use_datashader=False, i
                 x = np.array(erase_object.data['xs'][o]).astype(int)
                 y = np.array(erase_object.data['ys'][o]).astype(int)
                 rr, cc = polygon(y, x)
-                inshape = (label_annotation.label_image.shape[0] > rr) & (0 < rr) & (label_annotation.label_image.shape[1] > cc) & (
+                inshape = (tissue_tag_annotation.label_image.shape[0] > rr) & (0 < rr) & (tissue_tag_annotation.label_image.shape[1] > cc) & (
                             0 < cc)  # make sure pixels outside the image are ignored
-                label_annotation.label_image[rr[inshape], cc[inshape]] = 0
+                tissue_tag_annotation.label_image[rr[inshape], cc[inshape]] = 0
 
         if draw_object.data['xs']:
             print("Updating")
@@ -651,13 +575,13 @@ def segmenter(imarray, label_annotation, plot_size=1024, use_datashader=False, i
                 x = np.array(draw_object.data['xs'][o]).astype(int)
                 y = np.array(draw_object.data['ys'][o]).astype(int)
                 rr, cc = polygon(y, x)
-                inshape = (label_annotation.label_image.shape[0] > rr) & (0 < rr) & (label_annotation.label_image.shape[1] > cc) & (
+                inshape = (tissue_tag_annotation.label_image.shape[0] > rr) & (0 < rr) & (tissue_tag_annotation.label_image.shape[1] > cc) & (
                             0 < cc)  # make sure pixels outside the image are ignored
-                label_annotation.label_image[rr[inshape], cc[inshape]] = existing_object_count + o
-                label_annotation.annotation_map[annotation_prefix + '_' + str(existing_object_count+o)] = (
+                tissue_tag_annotation.label_image[rr[inshape], cc[inshape]] = existing_object_count + o
+                tissue_tag_annotation.annotation_map[annotation_prefix + '_' + str(existing_object_count + o)] = (
                     random.choice(colorpool))
 
-        annotation = rgb_from_labels(label_annotation)
+        annotation = rgb_from_labels(tissue_tag_annotation)
         annotation_c = annotation.astype('uint8').copy()
         if not invert_y:
             annotation_c = np.flip(annotation_c, 0)
@@ -680,10 +604,10 @@ def segmenter(imarray, label_annotation, plot_size=1024, use_datashader=False, i
 
         tab_object.loading = True
 
-        label_annotation.label_image = previous_label.copy()
-        label_annotation.annotation_map = previous_annotation_map.copy()
+        tissue_tag_annotation.label_image = previous_label.copy()
+        tissue_tag_annotation.annotation_map = previous_annotation_map.copy()
 
-        annotation = rgb_from_labels(label_annotation)
+        annotation = rgb_from_labels(tissue_tag_annotation)
         annotation_c = annotation.astype('uint8').copy()
         if not invert_y:
             annotation_c = np.flip(annotation_c, 0)
@@ -703,7 +627,7 @@ def segmenter(imarray, label_annotation, plot_size=1024, use_datashader=False, i
 
     return p
 
-def gene_labels_from_adata(adata, df, gene_markers, imarray, label_annotation, r, every_x_spots=101, unassigned_colour="yellow"):
+def gene_labels_from_adata(adata, gene_markers, tissue_tag_annotation, r, every_x_spots=101, unassigned_colour="yellow"):
     """
     Assign labels to training spots based on gene expression from an existing AnnData object.
 
@@ -717,7 +641,7 @@ def gene_labels_from_adata(adata, df, gene_markers, imarray, label_annotation, r
         Dictionary mapping markers to genes.
     imarray : np.ndarray
         Image to overlay labels onto.
-    label_annotation : LabelAnnotation
+    tissue_tag_annotation : TissueTagAnnotation
         Object storing label image and annotation map.
     r : float
         Radius of the spots.
@@ -728,30 +652,30 @@ def gene_labels_from_adata(adata, df, gene_markers, imarray, label_annotation, r
 
     Returns
     -------
-    LabelAnnotation
+    TissueTagAnnotation
         Updated LabelAnnotation object containing the training labels.
     """
 
-    if label_annotation.label_image is not None:
+    if tissue_tag_annotation.label_image is not None:
         print("Label image is not empty. Will replace with an empty label_image.")
 
-    if label_annotation.annotation_map is None:
+    if tissue_tag_annotation.annotation_map is None:
         raise ValueError("Annotation map is missing. Please provide an annotation map.")
     else:
-        label_annotation.annotation_map = OrderedDict(label_annotation.annotation_map)
-        label_annotation.annotation_map["unassigned"] = unassigned_colour
-        label_annotation.annotation_map.move_to_end("unassigned", last=False)
+        tissue_tag_annotation.annotation_map = OrderedDict(tissue_tag_annotation.annotation_map)
+        tissue_tag_annotation.annotation_map["unassigned"] = unassigned_colour
+        tissue_tag_annotation.annotation_map.move_to_end("unassigned", last=False)
 
     # Initialize label image
-    label_image = np.zeros((imarray.shape[0], imarray.shape[1]), dtype=np.uint8)
-    label_annotation.label_image = label_image
+    label_image = np.zeros((tissue_tag_annotation.image.shape[0], tissue_tag_annotation.image.shape[1]), dtype=np.uint8)
+    tissue_tag_annotation.label_image = label_image
 
     # Filter adata to match df indices
-    adata = adata[df.index.intersection(adata.obs.index)]
+    adata = adata[tissue_tag_annotation.positions.index.intersection(adata.obs.index)]
 
     # Extract coordinates
-    coordinates = np.array(df.loc[:, ["pxl_col", "pxl_row"]])
-    labels = background_labels(label_annotation.label_image.shape[:2], coordinates.T, every_x_spots=every_x_spots, r=r)
+    coordinates = np.array(tissue_tag_annotation.positions.loc[:, ["pxl_col", "pxl_row"]])
+    labels = background_labels(tissue_tag_annotation.label_image.shape[:2], coordinates.T, every_x_spots=every_x_spots, r=r)
 
     # Assign labels based on gene expression
     for marker, (gene, top_n) in gene_markers.items():
@@ -774,18 +698,18 @@ def gene_labels_from_adata(adata, df, gene_markers, imarray, label_annotation, r
         list_gene = adata.obs.index[np.array(np.squeeze(SortedExp[:top_n]))[0]]
 
         # Assign labels
-        for idx, sub in enumerate(label_annotation.annotation_map.keys()):
+        for idx, sub in enumerate(tissue_tag_annotation.annotation_map.keys()):
             if sub == marker:
                 label_value = idx
 
-        for coor in df.loc[list_gene, ["pxl_row", "pxl_col"]].to_numpy():
+        for coor in tissue_tag_annotation.positions.loc[list_gene, ["pxl_row", "pxl_col"]].to_numpy():
             labels[disk((coor[0], coor[1]), r)] = label_value + 1
 
-    label_annotation.label_image = labels
+    tissue_tag_annotation.label_image = labels
 
-    return label_annotation
+    return tissue_tag_annotation
 
-def gene_labels(path, df, gene_markers, imarray, label_annotation, r, every_x_spots = 101, unassigned_colour="yellow"):
+def gene_labels(path, gene_markers, tissue_tag_annotation, r, every_x_spots = 101, unassigned_colour="yellow"):
     """
     Assign labels to training spots based on gene expression.
 
@@ -808,28 +732,30 @@ def gene_labels(path, df, gene_markers, imarray, label_annotation, r, every_x_sp
 
     Returns
     -------
-    LabelAnnotation
+    TissueTagAnnotation
         LabelAnnotation object containing the training label.
     """
 
-    if label_annotation.label_image is not None:
-        raise ValueError("Label image is not empty. Please provide a label_annotation object with empty label_image.")
+    r = r*tissue_tag_annotation.ppm
 
-    if label_annotation.annotation_map is None:
+    if tissue_tag_annotation.label_image is not None:
+        raise ValueError("Label image is not empty. Please provide a tissue_tag_annotation object with empty label_image.")
+
+    if tissue_tag_annotation.annotation_map is None:
         raise ValueError("Annotation map is missing. Please provide annotation map.")
     else:
-        label_annotation.annotation_map = OrderedDict(label_annotation.annotation_map)
-        label_annotation.annotation_map["unassigned"] = unassigned_colour
-        label_annotation.annotation_map.move_to_end("unassigned", last=False)
+        tissue_tag_annotation.annotation_map = OrderedDict(tissue_tag_annotation.annotation_map)
+        tissue_tag_annotation.annotation_map["unassigned"] = unassigned_colour
+        tissue_tag_annotation.annotation_map.move_to_end("unassigned", last=False)
 
-    label_image = np.zeros((imarray.shape[0], imarray.shape[1]), dtype=np.uint8)
-    label_annotation.label_image = label_image
+    label_image = np.zeros((tissue_tag_annotation.image.shape[0], tissue_tag_annotation.image.shape[1]), dtype=np.uint8)
+    tissue_tag_annotation.label_image = label_image
 
     import scanpy
-    adata = scanpy.read_visium(path,count_file='raw_feature_bc_matrix.h5')
-    adata = adata[df.index.intersection(adata.obs.index)]
-    coordinates = np.array(df.loc[:,['pxl_col','pxl_row']])
-    labels = background_labels(label_annotation.label_image.shape[:2], coordinates.T, every_x_spots=every_x_spots, r=r)
+    adata = scanpy.read_visium(path, count_file='raw_feature_bc_matrix.h5')
+    adata = adata[tissue_tag_annotation.positions.index.intersection(adata.obs.index)]
+    coordinates = np.array(tissue_tag_annotation.positions.loc[:,['pxl_col','pxl_row']])
+    labels = background_labels(tissue_tag_annotation.label_image.shape[:2], coordinates.T, every_x_spots=every_x_spots, r=r)
 
     for m in list(gene_markers.keys()):
         print(gene_markers[m])
@@ -838,15 +764,15 @@ def gene_labels(path, df, gene_markers, imarray, label_annotation, r, every_x_sp
         GeneData = adata.X[:, GeneIndex].todense()
         SortedExp = np.argsort(GeneData, axis=0)[::-1]
         list_gene = adata.obs.index[np.array(np.squeeze(SortedExp[range(gene_markers[m][1])]))[0]]
-        for idx, sub in enumerate(list(label_annotation.annotation_map.keys())):
+        for idx, sub in enumerate(list(tissue_tag_annotation.annotation_map.keys())):
             if sub == m:
                 back = idx
-        for coor in df.loc[list_gene, ['pxl_row','pxl_col']].to_numpy():
+        for coor in tissue_tag_annotation.positions.loc[list_gene, ['pxl_row','pxl_col']].to_numpy():
             labels[disk((coor[0], coor[1]), r)] = back + 1
 
-    label_annotation.label_image = labels
+    tissue_tag_annotation.label_image = labels
 
-    return label_annotation
+    return tissue_tag_annotation
 
 
 def background_labels(shape, coordinates, r, every_x_spots=10, label=1):
