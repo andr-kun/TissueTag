@@ -29,18 +29,18 @@ class TissueTagAnnotation:
             Path to the HDF5 file.
         """
         with h5py.File(file_path, 'w') as f:
-            f.create_dataset('image', data=self.image)
-            f.create_dataset('ppm', data=self.ppm)
+            if self.image is not None:
+                f.create_dataset('image', data=self.image)
+            if self.ppm is not None:
+                f.create_dataset('ppm', data=self.ppm)
             if self.label_image is not None:
                 f.create_dataset('label_image', data=self.label_image)
             if self.annotation_map is not None:
                 f.create_dataset('annotation_map', data=json.dumps(self.annotation_map))
-            if self.positions is not None:
-                f.create_dataset('positions', data=self.positions.to_numpy())
-                f.attrs['positions_columns'] = json.dumps(self.positions.columns.tolist())
-            if self.grid is not None:
-                f.create_dataset('grid', data=self.grid.to_numpy())
-                f.attrs['grid_columns'] = json.dumps(self.grid.columns.tolist())
+        if self.positions is not None:
+            self.positions.to_hdf(file_path, key="positions", mode="a")
+        if self.grid is not None:
+            self.grid.to_hdf(file_path, key="positions", mode="a")
 
 
 def load_annotation(file_path):
@@ -58,24 +58,25 @@ def load_annotation(file_path):
         The loaded TissueTagAnnotation object.
     """
     with h5py.File(file_path, 'r') as f:
-        image = f['image'][:]
-        ppm = f['ppm'][()]
+        image = f['image'][:] if 'image' in f else None
+        ppm = f['ppm'][()] if 'ppm' in f else None
         label_image = f['label_image'][:] if 'label_image' in f else None
         annotation_map = json.loads(f['annotation_map'][()]) if 'annotation_map' in f else None
         positions = None
         if 'positions' in f:
-            positions = pd.DataFrame(f['positions'][:], columns=json.loads(f.attrs['positions_columns']))
+            positions = pd.read_hdf(file_path, key="positions")
         grid = None
         if 'grid' in f:
-            grid = pd.DataFrame(f['grid'][:], columns=json.loads(f.attrs['grid_columns']))
+            grid = pd.read_hdf(file_path, key="grid")
 
-    print(f'> loaded image - size - {str(image.shape)}')
-    print('> loaded ppm:')
-    print(ppm)
+    if image is not None:
+        print(f'> loaded image - size - {str(image.shape)}')
+    if ppm is not None:
+        print(f'> loaded ppm: {ppm}')
     if label_image is not None:
         print(f'> loaded label image - size - {str(label_image.shape)}')
     if annotation_map is not None:
-        print('> loaded annotation map:')
+        print(f'> loaded annotation map:')
         print(annotation_map)
     if positions is not None:
         print('> loaded positions')
