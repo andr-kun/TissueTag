@@ -460,7 +460,7 @@ def plot_labels(imarray, label_annotation, alpha=0.8, show=True):
     """
 
     labels_rgb = rgb_from_labels(label_annotation)
-    return overlay_labels(imarray, labels_rgb, alpha, show)
+    overlay_labels(imarray, labels_rgb, alpha, show)
 
 def save_annotation(folder, file_name, label_annotation, ppm):
     """
