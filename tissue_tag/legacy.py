@@ -228,7 +228,7 @@ def map_annotations_to_visium(vis_path, df_grid, ppm_grid, spot_to_spot, plot=Tr
         Annotated data matrix with Visium spot data and additional annotations.
     """
     # calculate distance matrix between hires and visium spots
-    im, ppm_visium, visium_positions = read_visium(spaceranger_dir_path=vis_path + '/', use_resolution=use_resolution, res_in_ppm=res_in_ppm, plot=False)
+    im, ppm_visium, visium_positions = read_visium(spaceranger_dir_path=vis_path + '/', use_resolution=use_resolution, ppm_out=res_in_ppm, plot=False)
 
     # rename columns for visium_positions DataFrame
     visium_positions.rename(columns={'pxl_row_in_fullres': "y", 'pxl_col_in_fullres': "x"}, inplace=True)

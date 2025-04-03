@@ -59,9 +59,6 @@ def create_disk_kernel(radius, shape):
     kernel[rr, cc] = True
     return kernel
 
-def apply_median_filter(image, kernel):
-    return scipy.ndimage.median_filter(image, footprint=kernel)
-
 def generate_grid_from_annotation(
     tissue_tag_annotation,
     spot_to_spot,
@@ -82,7 +79,7 @@ def generate_grid_from_annotation(
     #for idx0, anno in enumerate(annotation_image_list):
     anno_orig = skimage.transform.resize(tissue_tag_annotation.label_image, tissue_tag_annotation.label_image.shape[:2],
                                          preserve_range=True).astype('uint8')
-    filtered_image = apply_median_filter(anno_orig, kernel)
+    filtered_image = scipy.ndimage.median_filter(anno_orig, footprint=kernel)
 
     median_values = [filtered_image[int(point[1]), int(point[0])] for point in positions]
     annotation_label_list = {i + 1: v for i, v in enumerate(tissue_tag_annotation.annotation_map.keys())}

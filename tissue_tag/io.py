@@ -2,8 +2,10 @@ import json
 import pickle
 from dataclasses import dataclass
 from typing import Optional, Union
+from pathlib import Path
 
 import anndata
+import matplotlib
 import numpy as np
 import pandas as pd
 from PIL import Image, ImageEnhance
@@ -167,7 +169,7 @@ def read_image(
     return TissueTagAnnotation(np.array(im), ppm_out)
 
 
-def read_visium(
+def read_visium_legacy(
     spaceranger_dir_path,
     use_resolution='hires',
     res_in_ppm = None,
@@ -271,6 +273,239 @@ def read_visium(
     return TissueTagAnnotation(np.array(im), ppm, positions=df)
 
 
+def read_visium(
+    spaceranger_dir_path,
+    use_resolution='hires',
+    ppm_out = None,
+    mapped_image_path = None,
+    in_tissue = True,
+    plot = False,
+) -> TissueTagAnnotation:
+    """
+    Reads 10X Visium image data from SpaceRanger (v1.3.0).
+
+    Parameters
+    ----------
+    spaceranger_dir_path : str
+        Path to the 10X SpaceRanger output folder.
+    use_resolution : {'hires', 'lowres', 'fullres'}, optional
+        Desired image resolution. 'fullres' refers to the original image that was sent to SpaceRanger
+        along with sequencing data. If 'fullres' is specified, `fullres_path` must also be provided.
+        Defaults to 'hires'.
+    ppm_out : float, optional
+        Used when working with full resolution images to resize the full image to a specified pixels per
+        microns.
+    mapped_image_path : str, optional
+        Path to the full resolution image used for mapping. This must be specified if `use_resolution` is
+        set to 'fullres'.
+    header : int, optional (defa
+        newer SpaceRanger could need this to be set as 0. Default is None.
+    plot : Boolean
+        if to plot the visium object to scale
+    in_tissue : Boolean
+        if to take only tissue spots or all visium spots
+
+    Returns
+    -------
+    numpy.ndarray
+        The processed image.
+    float
+        The pixels per microns of the image.
+    pandas.DataFrame
+        A DataFrame containing information on the tissue positions.
+
+    Raises
+    ------
+    AssertionError
+        If 'use_resolution' is set to 'fullres' but 'fullres_path' is not specified.
+    """
+
+
+    # Load scale factors
+    scalefactors_file = spaceranger_dir_path + 'spatial/scalefactors_json.json'
+    with open(scalefactors_file, "r") as f:
+        scalefactors = json.load(f)
+
+    fullres_ppm = scalefactors['spot_diameter_fullres'] / 55 # Harcoded as visium has a fixed spot size of 55um
+
+    # Load tissue positions future proofing
+    spaceranger_spatial_dir_path = Path(spaceranger_dir_path  + '/spatial')
+    tissue_positions_file = next(
+        (f for f in [
+            spaceranger_spatial_dir_path / "tissue_positions.csv",
+            spaceranger_spatial_dir_path / "tissue_positions_list.csv"
+        ] if f.exists()),
+        None
+    )
+    if tissue_positions_file.name.endswith("_list.csv"): # Output from space ranger < 2.0
+        header = None
+        col_names = ['barcode', 'in_tissue', 'array_row', 'array_col', 'pxl_row_in_fullres', 'pxl_col_in_fullres']
+    else:
+        header = 0
+        col_names = None
+    print(tissue_positions_file.name)
+    df = pd.read_csv(tissue_positions_file, header=header, names=col_names).set_index('barcode')
+
+    if in_tissue:
+        df = df[df['in_tissue'] > 0]
+    # adjust to fullres
+    df["pxl_row_in_fullres"] /= fullres_ppm
+    df["pxl_col_in_fullres"] /= fullres_ppm
+
+    # Load images
+    spaceranger_spatial_path = Path(spaceranger_dir_path + '/spatial')
+
+    # image file paths
+    image_files = {
+        "mapped_res": mapped_image_path,
+        "hires": spaceranger_spatial_path / "tissue_hires_image.png",
+        "lowres": spaceranger_spatial_path / "tissue_lowres_image.png",
+    }
+
+    if use_resolution == "mapped_res" and mapped_image_path is None:
+        raise ValueError("Full resolution image path must be provided.")
+    if use_resolution == "mapped_res":
+        print('!!! Make sure this mapped_res image is the same one you used as spaceranger input !!!')
+
+    im = Image.open(image_files[use_resolution])
+    ppm_anno = fullres_ppm * scalefactors[f"tissue_{use_resolution}_scalef"] if use_resolution != "mapped_res" else fullres_ppm # adjust resolution to the image
+
+    # rescale image to target
+    if ppm_out:
+        width, height = im.size
+        new_size = (int(width * ppm_out / ppm_anno), int(height * ppm_out / ppm_anno))
+        im = im.resize(new_size, Image.Resampling.LANCZOS)
+        ppm_anno = ppm_out
+
+    # Convert coordinates by the same scaling
+    df["pxl_col"] = df["pxl_col_in_fullres"] * ppm_anno
+    df["pxl_row"] = df["pxl_row_in_fullres"] * ppm_anno
+
+    # Convert image to array
+    im = im.convert("RGBA")
+    im = np.array(im)
+
+
+    # if plot:
+    #     plt.figure(figsize=[12, 12])
+    #     coordinates = np.vstack((df['pxl_col'],df['pxl_row']))
+    #     plt.imshow(im,origin='lower')
+    #     plt.plot(coordinates[0,:],coordinates[1,:],'.')
+    #     plt.title( 'ppm - '+str(ppm))
+
+    if plot:
+        plot_visium_image(im, df, ppm_anno, 55, dpi=300, blowup_size_um=250, image_used=use_resolution)
+
+    return TissueTagAnnotation(image=im,ppm=ppm_anno,positions=df)
+
+def read_visium_hd(
+    spaceranger_dir_path,
+    bin_resolution  = '16',
+    use_resolution = "hires",
+    ppm_out = None,
+    mapped_image_path = None,
+    in_tissue = True,
+    plot = False,
+):
+    """
+    Reads 10X Visium HD dataset, including spatial image and metadata.
+
+    Parameters
+    ----------
+    spaceranger_dir_path : str
+        Directory containing Visium HD library data.
+    spaceranger_spatial_path : str or Path
+        Directory containing the spatial images.
+    bin_resolution : str, optional
+        Resolution of the Visium HD dataset to use. binnig level can be - '02','08','16'
+    use_resolution : str, optional
+        Desired image resolution ("mapped_res", "hires", "lowres"). selecting "hires" or "lowres" would use the spaceranger output image
+    ppm_out : float, optional
+        Target resolution in pixels per micron.
+    mapped_image_path : str, optional
+        Path to the original full-resolution image that use an input to spaceranger (required if use_resolution is "mapped_res").
+    in_tissue : bool, optional
+        Whether to include only tissue bins (default: True).
+    plot : bool, optional
+        Whether to plot the output image (default: False).
+
+
+    Returns
+    -------
+    tt annotation object
+    """
+
+
+    # Load scale factors
+    scalefactors_file = spaceranger_dir_path + f'/binned_outputs/square_0{bin_resolution}um/spatial/scalefactors_json.json'
+    with open(scalefactors_file, "r") as f:
+        scalefactors = json.load(f)
+
+    fullres_ppm = 1/scalefactors["microns_per_pixel"] # get to micron scale from pixels
+
+    # Load tissue positions future proofing
+    spaceranger_spatial_dir_path = Path(spaceranger_dir_path + f'/binned_outputs/square_0{bin_resolution}um/spatial/')  # Convert to Path
+    tissue_positions_file = next(
+        (f for f in [
+            spaceranger_spatial_dir_path / "tissue_positions.parquet",
+            spaceranger_spatial_dir_path / "tissue_positions.csv",
+            spaceranger_spatial_dir_path / "tissue_positions_list.csv"
+        ] if f.exists()),
+        None
+    )
+    if tissue_positions_file.suffix == ".csv":
+        df = pd.read_csv(tissue_positions_file, index_col=0)
+    elif tissue_positions_file.suffix == ".parquet":
+        df = pd.read_parquet(tissue_positions_file).set_index("barcode")
+
+    if in_tissue:
+        df = df[df["in_tissue"] > 0]
+    # adjust to fullres
+    df["pxl_row_in_fullres"] /= fullres_ppm
+    df["pxl_col_in_fullres"] /= fullres_ppm
+
+    # Load images
+    spaceranger_spatial_path = Path(spaceranger_dir_path + f'/spatial')
+
+    # image file paths
+    image_files = {
+    "mapped_res": mapped_image_path,
+    "hires": spaceranger_spatial_path / "tissue_hires_image.png",
+    "lowres": spaceranger_spatial_path / "tissue_lowres_image.png",
+    }
+
+    if use_resolution == "mapped_res" and mapped_image_path is None:
+        raise ValueError("Full resolution image path must be provided.")
+    if use_resolution == "mapped_res":
+        print('!!! Make sure this mapped_res image is the same one you used as spaceranger input !!!')
+
+    im = Image.open(image_files[use_resolution])
+    ppm_anno = fullres_ppm * scalefactors[f"tissue_{use_resolution}_scalef"] if use_resolution != "mapped_res" else fullres_ppm # adjust resolution to the image
+
+    # rescale image to target
+    if ppm_out:
+        width, height = im.size
+        new_size = (int(width * ppm_out / ppm_anno), int(height * ppm_out / ppm_anno))
+        im = im.resize(new_size, Image.Resampling.LANCZOS)
+        ppm_anno = ppm_out
+
+    # Convert coordinates by the same scaling
+    df["pxl_col"] = df["pxl_col_in_fullres"] * ppm_anno
+    df["pxl_row"] = df["pxl_row_in_fullres"] * ppm_anno
+
+    # Convert image to array
+    im = im.convert("RGBA")
+    im = np.array(im)
+
+
+
+    # Call the plotting function if plot=True
+    if plot:
+        plot_visium_image(im, df, ppm_anno, int(bin_resolution), dpi=300, blowup_size_um=320, image_used=use_resolution)
+
+    return TissueTagAnnotation(image=im,ppm=ppm_anno,positions=df)
+
+
 def simonson_vHE(dapi_image, eosin_image):
     """
     Create virtual H&E images using DAPI and eosin images.
@@ -294,15 +529,6 @@ def simonson_vHE(dapi_image, eosin_image):
         Virtual H&E image.
     """
 
-    def createVirtualHE(dapi_image, eosin_image, k1, k2, background, beta_DAPI, beta_eosin):
-        new_image = np.empty([dapi_image.shape[0], dapi_image.shape[1], 4])
-        new_image[:,:,0] = background[0] + (1 - background[0]) * np.exp(- k1 * beta_DAPI[0] * dapi_image - k2 * beta_eosin[0] * eosin_image)
-        new_image[:,:,1] = background[1] + (1 - background[1]) * np.exp(- k1 * beta_DAPI[1] * dapi_image - k2 * beta_eosin[1] * eosin_image)
-        new_image[:,:,2] = background[2] + (1 - background[2]) * np.exp(- k1 * beta_DAPI[2] * dapi_image - k2 * beta_eosin[2] * eosin_image)
-        new_image[:,:,3] = 1
-        new_image = new_image*255
-        return new_image.astype('uint8')
-
     k1 = k2 = 0.001
 
     background = [0.25, 0.25, 0.25]
@@ -315,4 +541,135 @@ def simonson_vHE(dapi_image, eosin_image):
     eosin_image = eosin_image[:,:,0]+eosin_image[:,:,1]
 
     print(dapi_image.shape)
-    return createVirtualHE(dapi_image, eosin_image, k1, k2, background, beta_DAPI, beta_eosin)
+
+    # create the virtual H&E image
+    new_image = np.empty([dapi_image.shape[0], dapi_image.shape[1], 4])
+    new_image[:, :, 0] = background[0] + (1 - background[0]) * np.exp(
+        - k1 * beta_DAPI[0] * dapi_image - k2 * beta_eosin[0] * eosin_image)
+    new_image[:, :, 1] = background[1] + (1 - background[1]) * np.exp(
+        - k1 * beta_DAPI[1] * dapi_image - k2 * beta_eosin[1] * eosin_image)
+    new_image[:, :, 2] = background[2] + (1 - background[2]) * np.exp(
+        - k1 * beta_DAPI[2] * dapi_image - k2 * beta_eosin[2] * eosin_image)
+    new_image[:, :, 3] = 1
+    new_image = new_image * 255
+
+    return new_image.astype('uint8')
+
+
+def plot_visium_image(
+    image: np.ndarray,
+    df: pd.DataFrame,
+    ppm_anno: float,
+    target_diameter_um: float = 16,
+    dpi: int = 100,
+    blowup_size_um: float = 500,
+    image_used: str = None,
+):
+    """
+    Plots Visium HD spatial data with a blowup region.
+
+    Args:
+        image: The image as a NumPy array.
+        df: The DataFrame containing spatial coordinates ('pxl_col', 'pxl_row').
+        ppm_anno: Pixels per micron.
+        target_diameter_um: Desired marker diameter in microns.
+        dpi: Figure DPI.
+        blowup_size_um: Size of the blowup region in microns.
+    """
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(18, 9), dpi=dpi)
+
+    # --- Main Plot (ax1) ---
+    ax1.imshow(image, origin="lower")
+
+    marker_size_pixels = target_diameter_um * ppm_anno
+    marker_size_display = (
+        ax1.transData.transform((marker_size_pixels, 0))[0]
+        - ax1.transData.transform((0, 0))[0]
+    )
+    marker_size_points = marker_size_display * (72.0 / fig.dpi)
+    marker_area_points_squared = marker_size_points**2
+
+    ax1.scatter(
+        df["pxl_col"],
+        df["pxl_row"],
+        s=marker_area_points_squared,
+        color="green",
+        marker="o",
+        linewidths=0,
+    )
+    ax1.set_title(f"Visium Spatial Data (PPM: {ppm_anno:.2f}, Bin size: {target_diameter_um}um, Image used: {image_used})")
+
+    # --- Blowup Region (ax2) ---
+
+    # 1. Calculate Center of Data:
+    center_x = df["pxl_col"].mean()
+    center_y = df["pxl_row"].mean()
+
+    # 2. Calculate Blowup Region Boundaries (in pixels):
+    blowup_half_size_pixels = (blowup_size_um / 2) * ppm_anno
+    x_min = int(center_x - blowup_half_size_pixels)
+    x_max = int(center_x + blowup_half_size_pixels)
+    y_min = int(center_y - blowup_half_size_pixels)
+    y_max = int(center_y + blowup_half_size_pixels)
+
+    # 3.  Handle image boundaries:
+    x_min = max(0, x_min)
+    y_min = max(0, y_min)
+    x_max = min(image.shape[1], x_max)  # image.shape[1] is width
+    y_max = min(image.shape[0], y_max)  # image.shape[0] is height
+
+    # 4. Extract the Blowup Region from the Image:
+    blowup_im = image[y_min:y_max, x_min:x_max]
+
+    # 5. Plot the Blowup Region:
+    ax2.imshow(blowup_im, origin="lower")
+    ax2.set_title(f"Blowup ({blowup_size_um}um x {blowup_size_um}um)")
+
+    # 6.  Plot points WITHIN the blowup region on the blowup plot:
+    df_blowup = df[
+        (df["pxl_col"] >= x_min)
+        & (df["pxl_col"] < x_max)
+        & (df["pxl_row"] >= y_min)
+        & (df["pxl_row"] < y_max)
+    ]
+
+    df_blowup_adj = df_blowup.copy()
+    df_blowup_adj["pxl_col"] -= x_min
+    df_blowup_adj["pxl_row"] -= y_min
+
+    marker_size_pixels = (target_diameter_um * ppm_anno)
+    marker_size_display = (
+        ax2.transData.transform((marker_size_pixels, 0))[0]
+        - ax2.transData.transform((0, 0))[0]
+    )
+    marker_size_points = marker_size_display * (72.0 / fig.dpi)
+    marker_area_points_squared = marker_size_points**2
+
+    ax2.scatter(
+        df_blowup_adj["pxl_col"],
+        df_blowup_adj["pxl_row"],
+        s=marker_area_points_squared,
+        color="green",
+        marker="o",
+        linewidths=0,
+        alpha=0.75,
+    )
+
+    # Draw a rectangle on the main plot (ax1)
+    rect = matplotlib.patches.Rectangle(
+        (x_min, y_min),
+        x_max - x_min,
+        y_max - y_min,
+        linewidth=1,
+        edgecolor="red",
+        facecolor="none",
+    )
+    ax1.add_patch(rect)
+
+    # Remove x and y ticks from blowup
+    ax2.set_xticks([])
+    ax2.set_yticks([])
+
+    plt.tight_layout()
+    plt.show()
