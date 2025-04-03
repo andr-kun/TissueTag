@@ -10,6 +10,7 @@ import matplotlib
 import matplotlib.font_manager as fm
 import numpy as np
 import panel as pn
+import pandas as pd
 from PIL import Image, ImageDraw, ImageFont, ImageColor
 from bokeh.models import FreehandDrawTool, PolyDrawTool
 from holoviews.operation import datashader as hd
@@ -17,6 +18,7 @@ from matplotlib import pyplot as plt
 from packaging import version
 from skimage import feature, future
 from skimage.draw import polygon, disk
+from skimage.future import trainable_segmentation
 from sklearn.ensemble import RandomForestClassifier
 
 import tissue_tag.io
@@ -108,45 +110,12 @@ class CustomPolyDrawCallback(hv.plotting.bokeh.callbacks.GlyphDrawCallback):
         super().initialize(plot_id)
 
 
-class SynchronisedFreehandDrawLink(hv.plotting.links.Link):
-    """
-    This custom class is a helper designed for creating synchronised FreehandDraw tools.
-    """
-
-    _requires_target = True
-
-
-class SynchronisedFreehandDrawCallback(hv.plotting.bokeh.LinkCallback):
-    """
-    This custom class implements the method to synchronise data between two FreehandDraw tools by manually updating
-    the data_source of the linked tools.
-    """
-
-    source_model = "cds"
-    source_handles = ["plot"]
-    target_model = "cds"
-    target_handles = ["plot"]
-    on_source_changes = ["data"]
-    on_target_changes = ["data"]
-
-    source_code = """
-        target_cds.data = source_cds.data
-        target_cds.change.emit()
-    """
-
-    target_code = """
-        source_cds.data = target_cds.data
-        source_cds.change.emit()
-    """
-
 # Overload the callback from holoviews to use the custom FreeHandDrawCallback class. Probably not safe.
 hv.plotting.bokeh.callbacks.Stream._callbacks['bokeh'].update({
     CustomFreehandDraw: CustomFreehandDrawCallback,
     CustomPolyDraw: CustomPolyDrawCallback
 })
 
-# Register the callback class to the link class
-SynchronisedFreehandDrawLink.register_callback('bokeh', SynchronisedFreehandDrawCallback)
 
 def to_base64(img):
     buffered = BytesIO()
@@ -360,43 +329,51 @@ def rgb_from_labels(tissue_tag_annotation):
 
 def sk_rf_classifier(tissue_tag_annotation, plot=True):
     """
-    A simple random forest pixel classifier from sklearn.
+    A simple random forest pixel classifier from sklearn using all RGB channels as features.
 
     Parameters
     ----------
-    im : array
-        The actual image to predict the labels from, should be the same size as training_labels.
-    training_labels : array
-        Label image with pixel values corresponding to labels.
-    anno_dict: dict
-        Dictionary of structures to annotate and colors for the structures.
-     plot : boolean, optional
-        if to plot the loaded image. default is True.
+    tt_obj :
+        tissuetag object
+    plot : boolean, optional
+        If to plot the loaded image. Default is True.
 
     Returns
     -------
-    array
+    LabelAnnotation
         Predicted label map.
     """
 
+    print("[INFO] Initializing classifier...")
     sigma_min = 1
     sigma_max = 16
     features_func = partial(feature.multiscale_basic_features,
-                            intensity=True, edges=False, texture=~True,
-                            sigma_min=sigma_min, sigma_max=sigma_max, channel_axis=-1)
+                            intensity=True, edges=True, texture=True,
+                            sigma_min=sigma_min, sigma_max=sigma_max, channel_axis=-1)  # Process all channels together
 
-    features = features_func(tissue_tag_annotation.image)
-    clf = RandomForestClassifier(n_estimators=50, n_jobs=-1,
-                                 max_depth=10, max_samples=0.05)
-    clf = future.fit_segmenter(tissue_tag_annotation.label_image, features, clf)
+    print("[INFO] Extracting features from all RGB channels...")
+    features = features_func(tissue_tag_annotation.image)  # Extract multiscale features for all channels at once
 
-    tissue_tag_annotation.label_image = future.predict_segmenter(features, clf)
+    print("[INFO] Training Random Forest classifier on RGB features...")
+    clf = RandomForestClassifier(n_estimators=50, n_jobs=-1, max_depth=10, max_samples=0.05)
+    clf = trainable_segmentation.fit_segmenter(tissue_tag_annotation.label_image, features, clf)
+
+    print("[INFO] Predicting labels based on trained classifier...")
+    predicted_labels = trainable_segmentation.predict_segmenter(features, clf)
+
+    print("[INFO] Final label prediction completed.")
+
+    tissue_tag_annotation.label_image = predicted_labels
 
     if plot:
+        print("[INFO] Generating visualization...")
         labels_rgb = rgb_from_labels(tissue_tag_annotation)
-        overlay_labels(tissue_tag_annotation.image,labels_rgb,alpha=0.7)
+        overlay_labels(tissue_tag_annotation.image, labels_rgb, alpha=0.7)
+        print("[INFO] Visualization complete.")
 
+    print("[INFO] Classification finished successfully.")
     return tissue_tag_annotation
+
 
 def overlay_labels(im1, im2, alpha=0.8, show=True):
     """
@@ -627,7 +604,9 @@ def segmenter(tissue_tag_annotation, plot_size=1024, use_datashader=False, inver
 
     return p
 
-def gene_labels_from_adata(adata, gene_markers, tissue_tag_annotation, r, every_x_spots=101, unassigned_colour="yellow"):
+
+def gene_labels_from_adata(adata, gene_markers, tissue_tag_annotation, diameter, override_labels=False,
+                           space_every_spots=10, normalize=True, unassigned_colour="yellow", intensity_threshold=230):
     """
     Assign labels to training spots based on gene expression from an existing AnnData object.
 
@@ -639,25 +618,34 @@ def gene_labels_from_adata(adata, gene_markers, tissue_tag_annotation, r, every_
         DataFrame containing spot coordinates.
     gene_markers : dict
         Dictionary mapping markers to genes.
-    imarray : np.ndarray
-        Image to overlay labels onto.
     tissue_tag_annotation : TissueTagAnnotation
         Object storing label image and annotation map.
-    r : float
+    diameter : float
         Radius of the spots.
-    every_x_spots : int, optional
-        Spacing between background labels. Higher value means fewer spots. Default is 101.
+    override_labels : boolean
+        if to remove past labels
+    normalize
+        if to normalise gene expression by default parametres calculated by - scanpy.pp.normalize_total()
     unassigned_colour : str, optional
         Color for unassigned labels. Default is "yellow".
 
     Returns
     -------
-    TissueTagAnnotation
-        Updated LabelAnnotation object containing the training labels.
+    Updated LabelAnnotation object containing the training labels.
     """
 
     if tissue_tag_annotation.label_image is not None:
-        print("Label image is not empty. Will replace with an empty label_image.")
+        print("Label image is not empty.")
+        if override_labels:
+            # Initialize label image
+            print("Will replace with an empty label_image.")
+            tissue_tag_annotation.label_image = np.zeros(
+                (tissue_tag_annotation.image.shape[0], tissue_tag_annotation.image.shape[1]), dtype=np.uint8)
+        else:
+            print("Will add new gene labels on top of old label_image.")
+    else:  # if the label_image spot is empty then create a blank one
+        tissue_tag_annotation.label_image = np.zeros(
+            (tissue_tag_annotation.image.shape[0], tissue_tag_annotation.image.shape[1]), dtype=np.uint8)
 
     if tissue_tag_annotation.annotation_map is None:
         raise ValueError("Annotation map is missing. Please provide an annotation map.")
@@ -666,127 +654,91 @@ def gene_labels_from_adata(adata, gene_markers, tissue_tag_annotation, r, every_
         tissue_tag_annotation.annotation_map["unassigned"] = unassigned_colour
         tissue_tag_annotation.annotation_map.move_to_end("unassigned", last=False)
 
-    # Initialize label image
-    label_image = np.zeros((tissue_tag_annotation.image.shape[0], tissue_tag_annotation.image.shape[1]), dtype=np.uint8)
-    tissue_tag_annotation.label_image = label_image
-
     # Filter adata to match df indices
     adata = adata[tissue_tag_annotation.positions.index.intersection(adata.obs.index)]
+    r = diameter / 2 * tissue_tag_annotation.ppm
 
     # Extract coordinates
-    coordinates = np.array(tissue_tag_annotation.positions.loc[:, ["pxl_col", "pxl_row"]])
-    labels = background_labels(tissue_tag_annotation.label_image.shape[:2], coordinates.T, every_x_spots=every_x_spots, r=r)
+    labels = background_labels_intensity(tissue_tag_annotation.label_image.shape[:2],
+                                         imarray=tissue_tag_annotation.image, r=r,
+                                         intensity_threshold=intensity_threshold, space_every_spots=space_every_spots,
+                                         label=1)
+    mask = tissue_tag_annotation.label_image > 0
+    labels[mask] = tissue_tag_annotation.label_image[mask]  # add old labels if these are not empty
 
-    # Assign labels based on gene expression
-    for marker, (gene, top_n) in gene_markers.items():
-        print(f"Processing marker: {marker}, Gene: {gene}")
-
-        GeneIndex = np.where(adata.var_names.str.fullmatch(gene))[0]
-        if GeneIndex.size == 0:
-            print(f"Warning: Gene {gene} not found in AnnData. Skipping.")
-            continue
-
-        # Normalize gene expression
-        from scanpy.pp import normalize_total
+    if normalize:
+        from scanpy.preprocessing import normalize_total
         normalize_total(adata)
 
-        # Extract gene expression data
-        GeneData = adata.X[:, GeneIndex].todense()
-        SortedExp = np.argsort(GeneData, axis=0)[::-1]  # Sort in descending order
+    # Assign labels based on gene expression
+    for marker, gene_list in gene_markers.items():
+        # Get the expected color for the marker
+        marker_color = tissue_tag_annotation.annotation_map.get(marker, "N/A")
+        print(f"🧬 Processing marker: '{marker}' | Color: {marker_color} | Genes: {[gene for gene, _ in gene_list]}")
 
-        # Select top N spots based on gene expression
-        list_gene = adata.obs.index[np.array(np.squeeze(SortedExp[:top_n]))[0]]
+        combined_gene_indices = []
+
+        for gene, top_n in gene_list:
+            GeneIndex = np.where(adata.var_names.str.fullmatch(gene))[0]
+            if GeneIndex.size == 0:
+                print(f"Warning: Gene {gene} not found in AnnData. Skipping.")
+                continue
+
+            GeneData = adata.X[:, GeneIndex].todense().A1  # Flatten to 1D array
+            nonzero_indices = np.where(GeneData > 0)[0]
+
+            if len(nonzero_indices) == 0:
+                print(f"Warning: No non-zero expression for gene {gene}. Skipping.")
+                continue
+
+            # Build a DataFrame to sort and shuffle
+            gene_df = pd.DataFrame({
+                "barcode": adata.obs.index[nonzero_indices],
+                "expression": GeneData[nonzero_indices]
+            })
+
+            # Shuffle within expression levels to avoid spatial artifacts
+            gene_df = gene_df.groupby("expression", group_keys=False).apply(lambda x: x.sample(frac=1))
+
+            # Now sort by expression descending
+            gene_df_sorted = gene_df.sort_values("expression", ascending=False)
+
+            # Take top N
+            actual_top_n = min(top_n, len(gene_df_sorted))
+            selected_barcodes = gene_df_sorted["barcode"].iloc[:actual_top_n]
+
+            combined_gene_indices.extend(selected_barcodes)
+
+        # Remove duplicates and convert to a set for faster lookups later
+        combined_gene_indices = set(combined_gene_indices)
 
         # Assign labels
         for idx, sub in enumerate(tissue_tag_annotation.annotation_map.keys()):
             if sub == marker:
                 label_value = idx
 
-        for coor in tissue_tag_annotation.positions.loc[list_gene, ["pxl_row", "pxl_col"]].to_numpy():
+        for coor in tissue_tag_annotation.positions.loc[list(combined_gene_indices), ["pxl_row", "pxl_col"]].to_numpy():
             labels[disk((coor[0], coor[1]), r)] = label_value + 1
 
     tissue_tag_annotation.label_image = labels
 
     return tissue_tag_annotation
 
-def gene_labels(path, gene_markers, tissue_tag_annotation, r, every_x_spots = 101, unassigned_colour="yellow"):
+
+def background_labels_intensity(shape, imarray, r, intensity_threshold=230, space_every_spots=10, label=1):
     """
-    Assign labels to training spots based on gene expression.
-
-    Parameters
-    ----------
-    path : string
-        path to visium object (cellranger output folder)
-    df : pandas.DataFrame
-        DataFrame containing spot coordinates.
-    labels : numpy.ndarray
-        Array for storing the training labels.
-    gene_markers : dict
-        Dictionary mapping markers to genes.
-    annodict : dict
-        Dictionary mapping markers to annotation names.
-    r : float
-        Radius of the spots.
-    every_x_spots : integer
-        spacing of background labels to generate, higher number means less spots. Default is 100
-
-    Returns
-    -------
-    TissueTagAnnotation
-        LabelAnnotation object containing the training label.
-    """
-
-    r = r*tissue_tag_annotation.ppm
-
-    if tissue_tag_annotation.label_image is not None:
-        raise ValueError("Label image is not empty. Please provide a tissue_tag_annotation object with empty label_image.")
-
-    if tissue_tag_annotation.annotation_map is None:
-        raise ValueError("Annotation map is missing. Please provide annotation map.")
-    else:
-        tissue_tag_annotation.annotation_map = OrderedDict(tissue_tag_annotation.annotation_map)
-        tissue_tag_annotation.annotation_map["unassigned"] = unassigned_colour
-        tissue_tag_annotation.annotation_map.move_to_end("unassigned", last=False)
-
-    label_image = np.zeros((tissue_tag_annotation.image.shape[0], tissue_tag_annotation.image.shape[1]), dtype=np.uint8)
-    tissue_tag_annotation.label_image = label_image
-
-    import scanpy
-    adata = scanpy.read_visium(path, count_file='raw_feature_bc_matrix.h5')
-    adata = adata[tissue_tag_annotation.positions.index.intersection(adata.obs.index)]
-    coordinates = np.array(tissue_tag_annotation.positions.loc[:,['pxl_col','pxl_row']])
-    labels = background_labels(tissue_tag_annotation.label_image.shape[:2], coordinates.T, every_x_spots=every_x_spots, r=r)
-
-    for m in list(gene_markers.keys()):
-        print(gene_markers[m])
-        GeneIndex = np.where(adata.var_names.str.fullmatch(gene_markers[m][0]))[0]
-        scanpy.pp.normalize_total(adata)
-        GeneData = adata.X[:, GeneIndex].todense()
-        SortedExp = np.argsort(GeneData, axis=0)[::-1]
-        list_gene = adata.obs.index[np.array(np.squeeze(SortedExp[range(gene_markers[m][1])]))[0]]
-        for idx, sub in enumerate(list(tissue_tag_annotation.annotation_map.keys())):
-            if sub == m:
-                back = idx
-        for coor in tissue_tag_annotation.positions.loc[list_gene, ['pxl_row','pxl_col']].to_numpy():
-            labels[disk((coor[0], coor[1]), r)] = back + 1
-
-    tissue_tag_annotation.label_image = labels
-
-    return tissue_tag_annotation
-
-
-def background_labels(shape, coordinates, r, every_x_spots=10, label=1):
-    """
-    Generate background labels.
+    Generate background labels based on intensity (bright pixels in brightfield images).
 
     Parameters
     ----------
     shape : tuple
         Shape of the training labels array.
-    coordinates : numpy.ndarray
-        Array containing the coordinates of the spots.
+    imarray : numpy.ndarray
+        RGB image used to identify bright background areas.
     r : float
         Radius of the spots.
+    intensity_threshold : int, optional
+        Threshold above which pixels are considered background. Default is 200.
     every_x_spots : int, optional
         Spacing between background spots. Default is 10.
     label : int, optional
@@ -798,50 +750,68 @@ def background_labels(shape, coordinates, r, every_x_spots=10, label=1):
         Array containing the background labels.
     """
 
+    # Convert RGBA to grayscale using only RGB channels
+    if imarray.shape[-1] == 4:  # RGBA
+        grayscale = np.dot(imarray[..., :3], [0.2989, 0.5870, 0.1140])  # Standard grayscale conversion
+    elif imarray.shape[-1] == 3:  # RGB
+        grayscale = np.dot(imarray, [0.2989, 0.5870, 0.1140])
+    else:
+        raise ValueError("Unexpected number of channels in imarray.")
+
+    # Identify bright pixels in the grayscale image (background areas)
+    background_mask = grayscale > intensity_threshold
+
     training_labels = np.zeros(shape, dtype=np.uint8)
-    Xmin = np.min(coordinates[:, 0])
-    Xmax = np.max(coordinates[:, 0])
-    Ymin = np.min(coordinates[:, 1])
-    Ymax = np.max(coordinates[:, 1])
-    grid = hexagonal_grid(r, shape)
-    grid = grid.T
-    grid = grid[::every_x_spots, :]
+    grid = square_grid(r, shape, space_every_spots).T
+
+    print(imarray.shape)
 
     for coor in grid:
-        training_labels[disk((coor[1], coor[0]), r,shape=shape)] = label
-
-
-    for coor in coordinates.T:
-        training_labels[disk((coor[1], coor[0]), r * 4,shape=shape)] = 0
+        y, x = int(coor[1]), int(coor[0])  # Ensure integer indices
+        if y >= background_mask.shape[0] or x >= background_mask.shape[1]:  # Avoid out-of-bounds indexing
+            continue
+        if np.any(background_mask[y, x]):  # Use `.any()` if needed
+            training_labels[disk((y, x), r, shape=shape)] = label
 
     return training_labels
 
 
-def hexagonal_grid(SpotSize, shape):
+def square_grid(spot_size, shape, space_every_spots):
     """
-    Generate a hexagonal grid.
+    Generate a square grid using vectorized operations.
 
     Parameters
     ----------
-    SpotSize : float
+    spot_size : float
         Size of the spots.
     shape : tuple
-        Shape of the grid.
+        Shape of the grid (height, width).
 
     Returns
     -------
     numpy.ndarray
         Array containing the coordinates of the grid.
     """
+    # Define step sizes
+    dx = spot_size * space_every_spots  # Horizontal spacing
+    dy = spot_size * space_every_spots  # Vertical spacing
 
-    helper = SpotSize
-    X1 = np.linspace(helper, shape[0] - helper, round(shape[0] / helper))
-    Y1 = np.linspace(helper, shape[1] - 2 * helper, round(shape[1] / (2 * helper)))
-    X2 = X1 + SpotSize / 2
-    Y2 = Y1 + helper
-    Gx1, Gy1 = np.meshgrid(X1, Y1)
-    Gx2, Gy2 = np.meshgrid(X2, Y2)
-    positions1 = np.vstack([Gy1.ravel(), Gx1.ravel()])
-    positions2 = np.vstack([Gy2.ravel(), Gx2.ravel()])
-    positions = np.hstack([positions1, positions2])
+    # Generate meshgrid for a square grid
+    x_coords = np.arange(spot_size, shape[0] - spot_size, dx)
+    y_coords = np.arange(spot_size, shape[1] - spot_size, dy)
+
+    gx, gy = np.meshgrid(x_coords, y_coords)
+
+    # Stack the x and y coordinates
+    positions = np.vstack([gy.ravel(), gx.ravel()])
+
     return positions
+
+
+def median_filter(tissue_tag_object, filter_radius=10):
+    from skimage.filters import median
+    from skimage.morphology import disk
+    r = int(filter_radius*tissue_tag_object.ppm)
+    tissue_tag_object.label_image = median(tissue_tag_object.label_image, footprint=disk(r))
+
+    return tissue_tag_object
