@@ -21,7 +21,9 @@ setup(
         'holoviews',
         'datashader',
         'panel==1.4.5',
-        'jupyterlab'
+        'scanpy',
+        'jupyterlab',
+        'tables'
     ],
     author='Oren Amsalem, Nadav Yayon, Andrian Yang',
     author_email='ny1@sanger.ac.uk',
