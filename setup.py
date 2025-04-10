@@ -9,7 +9,7 @@ setup(
     packages=find_packages(),
     install_requires=[
         'opencv-python',
-        'Pillow',
+        'pillow',
         'bokeh',
         'jupyter-bokeh',
         'matplotlib',
@@ -23,7 +23,12 @@ setup(
         'panel==1.4.5',
         'scanpy',
         'jupyterlab',
-        'tables'
+        'tables',
+        'h5py',
+        'setuptools',
+        'numpy',
+        'bin2cell'
+        'packaging',
     ],
     author='Oren Amsalem, Nadav Yayon, Andrian Yang',
     author_email='ny1@sanger.ac.uk',
