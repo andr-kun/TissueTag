@@ -22,8 +22,6 @@ from skimage.draw import polygon, disk
 from skimage.future import trainable_segmentation
 from sklearn.ensemble import RandomForestClassifier
 from scanpy.preprocessing import normalize_total
-from skimage.filters import median
-from skimage.morphology import disk
 
 from tissue_tag.io import TissueTagAnnotation
 
@@ -934,6 +932,9 @@ def median_filter(tissue_tag_annotation, filter_radius=10, copy=False):
     None | TissueTagAnnotation
         TissueTagAnnotation object with filtered label_image if copy is True,otherwise None.
     """
+
+    from skimage.filters import median
+    from skimage.morphology import disk
 
     tissue_tag_annotation = cp.deepcopy(tissue_tag_annotation) if copy else tissue_tag_annotation
 
