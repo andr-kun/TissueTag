@@ -27,7 +27,7 @@ setup(
         'h5py',
         'setuptools',
         'numpy',
-        'bin2cell'
+        'bin2cell',
         'packaging',
     ],
     author='Oren Amsalem, Nadav Yayon, Andrian Yang',
