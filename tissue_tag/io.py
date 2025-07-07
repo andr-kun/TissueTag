@@ -6,11 +6,14 @@ from pathlib import Path
 import matplotlib
 import numpy as np
 import pandas as pd
-from PIL import Image, ImageEnhance
+import skimage.exposure
+from PIL import Image, ImageEnhance, ImageOps, ImageColor
 from matplotlib import pyplot as plt
 from matplotlib.patches import Circle
 from matplotlib.collections import PatchCollection
 import h5py
+import gzip
+import tifffile
 
 @dataclass
 class TissueTagAnnotation:
@@ -170,12 +173,12 @@ def read_visium(
     plot = False,
 ) -> TissueTagAnnotation:
     """
-    Reads 10X Visium image data from SpaceRanger.
+    Reads 10X Visium data from SpaceRanger.
 
     Parameters
     ----------
     spaceranger_dir_path : str
-        Path to the 10X SpaceRanger output folder.
+        Directory containing Visium library data.
     use_resolution : {'hires', 'lowres', 'mapped_res'}, optional
         Desired image resolution. 'mapped_res' refers to the original image that was sent to SpaceRanger
         along with sequencing data. If 'mapped_res' is specified, `mapped_image_path` must also be provided.
@@ -263,7 +266,7 @@ def read_visium(
     im = np.array(im)
 
     if plot:
-        plot_visium_image(im, df, ppm_anno, 55, dpi=300, blowup_size_um=250, image_resolution=use_resolution)
+        plot_10x_spatial_image(im, df, ppm_anno, 55, dpi=300, blowup_size_um=250, technology="Visium", image_info="Image resolution: " + use_resolution)
 
     return TissueTagAnnotation(image=im,ppm=ppm_anno,positions=df)
 
@@ -277,14 +280,12 @@ def read_visium_hd(
     plot = False,
 ):
     """
-    Reads 10X Visium HD dataset, including spatial image and metadata.
+    Reads 10X Visium HD data from SpaceRanger, including spatial image and metadata.
 
     Parameters
     ----------
     spaceranger_dir_path : str
         Directory containing Visium HD library data.
-    spaceranger_spatial_path : str or Path
-        Directory containing the spatial images.
     bin_resolution : str, optional
         Resolution of the Visium HD bins to use. Binning level can be - '02','08','16'. Defaults to 16.
     use_resolution : {'hires', 'lowres', 'mapped_res'}, optional
@@ -372,9 +373,144 @@ def read_visium_hd(
 
     # Call the plotting function if plot=True
     if plot:
-        plot_visium_image(im, df, ppm_anno, int(bin_resolution), dpi=300, blowup_size_um=320, image_resolution=use_resolution)
+        plot_10x_spatial_image(im, df, ppm_anno, int(bin_resolution), dpi=300, blowup_size_um=320, technology="VisiumHD", image_info="Image resolution: " + use_resolution)
 
     return TissueTagAnnotation(image=im,ppm=ppm_anno,positions=df)
+
+
+def read_xenium(
+    xeniumranger_dir_path,
+    ppm_out = 1,
+    image_quantiles = (0.05, 0.999),
+    image_output = "fluorescence",
+    fluorescence_channels = [0, 1, 2, 3],
+    channel_colours = ["#0F73E6", "#F300A5", "#A4A400", "#008A00"],
+    plot = False,
+):
+    """
+    Reads 10X Xenium data from XeniumRanger, including spatial image and metadata.
+
+    Parameters
+    ----------
+    xeniumranger_dir_path : str
+        Directory containing Xenium library data.
+    ppm_out : float, optional
+        Target resolution in pixels per micron.
+    image_quantiles : tuple, optional
+        Quantiles to use for auto-scaling of fluorescence levels.
+    image_output : str, optional
+        Whether to generate virtual fluorescence image or a virtual H&E image as output.
+        If fluorescence is selected, the channels loaded and the colour of the channels will be based on the
+        fluorescence_channels and channel_colours parameters.
+        If virtualHE is selected, the first channel will be used as the dapi image and
+        the remaining channels will be stacked ans used as the eosin image.
+    fluorescence_channels : list, optional
+        List of channels to include in the virtual fluorescence image.
+    channel_colours: str or list, optional
+        Colours to use for the fluorescence channels. Can be set to "grayscale" or a list of 4 channel colours in hex format.
+    plot : bool, optional
+        Whether to plot the output image. Defaults to False.
+
+
+    Returns
+    -------
+    TissueTagAnnotation
+        TissueTagAnnotation object containing the Xenium morphology focus image and positions of the spots.
+    """
+
+    if image_output not in ["fluorescence", "virtualHE"]:
+        raise ValueError("Image output must be 'fluorescence' or 'virtualHE'.")
+    if fluorescence_channels is None or len(fluorescence_channels) == 0:
+        raise ValueError("Need to specify at least one channel to load.")
+    if channel_colours is None:
+        raise ValueError("Need to specify channel colours as either 'grayscale' or a list of 4 channel colours in hex.")
+    else:
+        if not ((type(channel_colours) == str and channel_colours == "grayscale") or
+                (type(channel_colours) == list and len(channel_colours) == 4)):
+            raise ValueError(
+                "Need to specify channel colours as either 'grayscale' or a list of 4 channel colours in hex.")
+
+    # Load xenium metadata
+    metadata_file = xeniumranger_dir_path + f'/experiment.xenium'
+    with open(metadata_file, "r") as f:
+        metadata = json.load(f)
+
+    fullres_ppm = 1/metadata["pixel_size"] # get to micron scale from pixels
+
+    # Load cell positions
+    cell_position =  xeniumranger_dir_path + f'/cells.csv.gz'
+    with gzip.open(cell_position, 'rt') as f:
+        df = pd.read_csv(f, index_col=0)
+
+    # Load images
+    morphology_path = Path(xeniumranger_dir_path + f'/morphology_focus/')
+
+    # image file paths
+    image_files = sorted([f for f in morphology_path.glob("*.ome.tif") if f.is_file()])
+
+    # calculate ppm for each pyramidal layer
+    im_meta = tifffile.TiffFile(image_files[0]).pages[0]
+    pyramidal_ppm = np.zeros(len(im_meta.pages)+1)
+    pyramidal_ppm[0] = im_meta.shape[1]
+    for i in range(len(im_meta.pages)):
+        pyramidal_ppm[i+1] = im_meta.pages[i].shape[1]
+    pyramidal_ppm /= pyramidal_ppm[0]
+    pyramidal_ppm *= fullres_ppm
+
+    # select pyramidal layer to load
+    if ppm_out is None:
+        ppm_out = fullres_ppm
+
+    pyramid_layer = np.abs(pyramidal_ppm - ppm_out).argmin()
+    pyramid_ppm = pyramidal_ppm[pyramid_layer]
+
+    if image_output == "virtualHE":
+        fluorescence_channels = [1, 2, 3, 0]
+        channel_colours = "grayscale"
+
+    stacked_im = None
+    for channel in fluorescence_channels:
+        im = tifffile.imread(image_files[channel], is_ome=False, level=pyramid_layer)
+
+        low_quantile, high_quantile = np.quantile(im, q=image_quantiles[0]), np.quantile(im, q=image_quantiles[1])
+        im[im > high_quantile] = high_quantile
+        im = ((im - low_quantile) / (high_quantile - low_quantile) * 255).astype(np.uint8)
+        im = np.flipud(im)
+
+        im = Image.fromarray(im).convert("L")
+
+        if ppm_out != pyramid_ppm:
+            width, height = im.size
+            new_size = (int(width / pyramid_ppm * ppm_out), int(height / pyramid_ppm * ppm_out))
+
+            im = im.resize(new_size, Image.Resampling.LANCZOS)
+
+        if channel_colours != "grayscale":
+            im = ImageOps.colorize(im, black="black", white=ImageColor.getcolor(channel_colours[channel], "RGB"))
+        im = im.convert("RGBA")
+
+        if stacked_im is None:
+            stacked_im = np.array(im)
+        else:
+            if image_output == "virtualHE" and channel == 0:
+                stacked_im = simonson_vHE(np.array(im), stacked_im)
+            else:
+                proj_fun = np.max
+                stacked_im = proj_fun(np.stack([stacked_im, np.array(im)], axis = 3), axis = 3)
+
+        del(im)
+
+    print(stacked_im.shape)
+
+    # Convert coordinates by the same scaling
+    df["pxl_col"] = df["x_centroid"] * ppm_out
+    df["pxl_row"] = (stacked_im.shape[0] - 1) - df["y_centroid"] * ppm_out
+
+    # Call the plotting function if plot=True
+    if plot:
+        plot_10x_spatial_image(stacked_im, df, ppm_out, 0.5, dpi=300, blowup_size_um=320, technology="Xenium", image_info=f"Output type: {image_output}", blowup_marker_multiplier=6)
+
+    return TissueTagAnnotation(image=stacked_im,ppm=ppm_out,positions=df)
 
 
 def simonson_vHE(dapi_image, eosin_image):
@@ -407,6 +543,9 @@ def simonson_vHE(dapi_image, eosin_image):
 
     beta_eosin = [0.1, 15.8, 0.3]
 
+    dapi_image = dapi_image.astype('float64')
+    eosin_image = eosin_image.astype('float64')
+
     dapi_image = dapi_image[:,:,0]+dapi_image[:,:,1]
     eosin_image = eosin_image[:,:,0]+eosin_image[:,:,1]
 
@@ -426,17 +565,19 @@ def simonson_vHE(dapi_image, eosin_image):
     return new_image.astype('uint8')
 
 
-def plot_visium_image(
+def plot_10x_spatial_image(
     image: np.ndarray,
     positions: pd.DataFrame,
     ppm: float,
     target_diameter_um: float = 16.0,
     dpi: int = 100,
     blowup_size_um: float = 500.0,
-    image_resolution: str = None
+    technology: str = "Visium",
+    image_info: str = None,
+    blowup_marker_multiplier: float = 0.5
 ):
     """
-    Plots Visium-based spatial data with a blowup region.
+    Plots 10x-based spatial data with a blowup region.
 
     Parameters
     ----------
@@ -452,8 +593,10 @@ def plot_visium_image(
             Figure DPI. Defaults to 100.
         blowup_size_um: float, optional
             Size of the blowup region in microns. Defaults to 500.0.
-        image_resolution: str, optional
+        image_info: str, optional
             Resolution of the image. Defaults to None.
+        blowup_marker_multiplier: float, optional
+            Marker size multiplier of the blowup region. Defaults to 0.5.
 
     Returns
     -------
@@ -476,7 +619,7 @@ def plot_visium_image(
     collection.set_alpha(1)
     ax1.add_collection(collection)
 
-    ax1.set_title(f"Visium Spatial Data (PPM: {ppm:.2f}, Bin size: {target_diameter_um}um, Image resolution: {image_resolution})")
+    ax1.set_title(f"Visium Spatial Data (PPM: {ppm:.2f}, Bin size: {target_diameter_um}um{", " + image_info if image_info else ""})")
 
     # --- Blowup Region (ax2) ---
 
@@ -518,7 +661,7 @@ def plot_visium_image(
 
     marker_size_pixels = (target_diameter_um * ppm)
 
-    zipped_blowup = np.broadcast(df_blowup_adj["pxl_col"], df_blowup_adj["pxl_row"], marker_size_pixels * 0.5)
+    zipped_blowup = np.broadcast(df_blowup_adj["pxl_col"], df_blowup_adj["pxl_row"], marker_size_pixels * blowup_marker_multiplier)
     patches_blowup = [Circle((x_, y_), s_) for x_, y_, s_ in zipped_blowup]
     collection_blowup = PatchCollection(patches_blowup)
     collection_blowup.set_facecolor("green")
