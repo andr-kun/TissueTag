@@ -16,7 +16,6 @@ from PIL import Image, ImageDraw, ImageFont, ImageColor
 from bokeh.models import FreehandDrawTool, PolyDrawTool
 from holoviews.operation import datashader as hd
 from matplotlib import pyplot as plt
-from matplotlib.backends.backend_agg import FigureCanvas
 from matplotlib.patches import Circle
 from matplotlib.collections import PatchCollection
 from packaging import version

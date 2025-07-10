@@ -29,6 +29,8 @@ setup(
         'numpy',
         'bin2cell',
         'packaging',
+        'tifffile',
+        'imagecodecs'
     ],
     author='Oren Amsalem, Nadav Yayon, Andrian Yang',
     author_email='ny1@sanger.ac.uk',
