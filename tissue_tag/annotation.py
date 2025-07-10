@@ -16,6 +16,9 @@ from PIL import Image, ImageDraw, ImageFont, ImageColor
 from bokeh.models import FreehandDrawTool, PolyDrawTool
 from holoviews.operation import datashader as hd
 from matplotlib import pyplot as plt
+from matplotlib.backends.backend_agg import FigureCanvas
+from matplotlib.patches import Circle
+from matplotlib.collections import PatchCollection
 from packaging import version
 from skimage import feature, future
 from skimage.draw import polygon, disk
@@ -508,7 +511,7 @@ def overlay_labels(im1, im2, alpha=0.8, show=True):
     return None if show else out_img
 
 
-def plot_labels(tissue_tag_annotation, alpha=0.8, show=True):
+def plot_labels(tissue_tag_annotation, alpha=0.8):
     """
     Helper function to plot the annotation labels on the image.
 
@@ -518,17 +521,14 @@ def plot_labels(tissue_tag_annotation, alpha=0.8, show=True):
         TissueTagAnnotation object with image, label_image and annotation map.
     alpha : float, optional
         Blending factor, by default 0.8.
-    show : bool, optional
-        If to show the merged plot or not, by default True.
 
     Returns
     -------
-    None | numpy.ndarray
-        The merged image array if show is False, otherwise None.
+    None
     """
 
     annotation = rgb_from_labels(tissue_tag_annotation)
-    return overlay_labels(tissue_tag_annotation.image, annotation, alpha, show)
+    return overlay_labels(tissue_tag_annotation.image, annotation, alpha, show=True)
 
 
 def segmenter(tissue_tag_annotation, plot_size=1024, invert_y=False, use_datashader=False,
@@ -942,3 +942,91 @@ def median_filter(tissue_tag_annotation, filter_radius=10, copy=False):
     tissue_tag_annotation.label_image = median(tissue_tag_annotation.label_image, footprint=disk(r))
 
     return tissue_tag_annotation if copy else None
+
+
+def assign_annotation_label_to_positions(tissue_tag_annotation, annotation_column='annotation', copy=False):
+    """
+    Assign annotation to each cell in positions data frame based on the cell centroid co-ordinates.
+
+    Parameters
+    ----------
+    tissue_tag_annotation : TissueTagAnnotation
+        TissueTagAnnotation object with label_image and positions data frame.
+    annotation_column : str, optional
+        Column name for the annotation values. Default is 'annotation'.
+    copy: bool, optional
+        Return a copy of TissueTagAnnotation object rather than updating the positions data frame in the original object.
+
+    Returns
+    -------
+    None | TissueTagAnnotation
+        TissueTagAnnotation object with updated positions data frame if copy is True,otherwise None.
+    """
+    if tissue_tag_annotation.label_image is None:
+        raise ValueError("Label image is missing. Please annotate the image first.")
+
+    if tissue_tag_annotation.annotation_map is None:
+        raise ValueError("Annotation map is missing. Please provide an annotation map.")
+
+    if tissue_tag_annotation.positions is None:
+        raise ValueError("Positions data frame is missing. Please provide positions data frame.")
+
+    tissue_tag_annotation = cp.deepcopy(tissue_tag_annotation) if copy else tissue_tag_annotation
+
+    annotation_label_list = {i + 1: v for i, v in enumerate(tissue_tag_annotation.annotation_map.keys())}
+
+    def get_annotation(row):
+        annotation_id = tissue_tag_annotation.label_image[int(np.round(row["pxl_row"])), int(np.round(row["pxl_col"]))]
+        return annotation_label_list.get(annotation_id, "Unknown")
+
+    tissue_tag_annotation.positions[annotation_column] = tissue_tag_annotation.positions.apply(get_annotation, 1)
+
+    return tissue_tag_annotation if copy else None
+
+
+def plot_cell_label_annotations(tissue_tag_annotation, cell_diameter=5.0, annotation_column='annotation', alpha=0.8):
+    """
+    Helper function to plot the cell annotation labels on the image.
+
+    Parameters
+    ----------
+    tissue_tag_annotation: TissueTagAnnotation
+        TissueTagAnnotation object with image, label_image and annotation map.
+    cell_diameter: float, optional
+        Desired marker diameter in microns. Defaults to 5.0.
+        Recommended values are 55 for Visium and 2, 8 or 16 depending on bin size selected for Visium HD.
+    annotation_column : str, optional
+        Column name for the annotation values. Default is 'annotation'.
+    alpha : float, optional
+        Blending factor, by default 0.8.
+
+    Returns
+    -------
+    None
+    """
+
+    if tissue_tag_annotation.positions is None:
+        raise ValueError("Positions data frame is missing. Please provide positions data frame.")
+    if annotation_column not in tissue_tag_annotation.positions.columns is None:
+        raise ValueError("Annotation column in posititions data frame is missing. Please assign annotation to cells first.")
+
+    fig, ax = plt.subplots(figsize=(10, 10), dpi = 100)
+
+    base_img = np.zeros(tissue_tag_annotation.image.shape, dtype=tissue_tag_annotation.image.dtype)
+    base_img[:, :, :] = (alpha * tissue_tag_annotation.image[:, :, :])
+    base_img[:, :, 3] = 255
+    ax.imshow(base_img, origin='lower')
+
+    marker_size_pixels = cell_diameter * tissue_tag_annotation.ppm
+    for ann, color in tissue_tag_annotation.annotation_map.items():
+        selected_position = tissue_tag_annotation.positions[tissue_tag_annotation.positions[annotation_column] == ann]
+        zipped = np.broadcast(selected_position["pxl_col"], selected_position["pxl_row"], marker_size_pixels * 0.5)
+        patches = [Circle((x_, y_), s_) for x_, y_, s_ in zipped]
+        collection = PatchCollection(patches)
+        collection.set_facecolor(color)
+        collection.set_edgecolor(color)
+        collection.set_alpha(1-alpha)
+        ax.add_collection(collection)
+
+    plt.show()
+    plt.close(fig)

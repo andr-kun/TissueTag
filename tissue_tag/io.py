@@ -20,6 +20,7 @@ class TissueTagAnnotation:
     image: np.array
     ppm: float
     label_image: Optional[np.array] = None
+    # Note that value 0 in label_image is a special value to indicate no annotation has been assigned
     annotation_map: Optional[dict] = None
     positions: Optional[pd.DataFrame] = None
     grid: Optional[pd.DataFrame] = None
@@ -546,8 +547,8 @@ def simonson_vHE(dapi_image, eosin_image):
     dapi_image = dapi_image.astype('float64')
     eosin_image = eosin_image.astype('float64')
 
-    dapi_image = dapi_image[:,:,0]+dapi_image[:,:,1]
-    eosin_image = eosin_image[:,:,0]+eosin_image[:,:,1]
+    dapi_image = dapi_image[:,:,0]
+    eosin_image = eosin_image[:,:,0]
 
     print(dapi_image.shape)
 
@@ -619,7 +620,9 @@ def plot_10x_spatial_image(
     collection.set_alpha(1)
     ax1.add_collection(collection)
 
-    ax1.set_title(f"Visium Spatial Data (PPM: {ppm:.2f}, Bin size: {target_diameter_um}um{", " + image_info if image_info else ""})")
+    ax1.set_title(f"{technology} Spatial Data (PPM: {ppm:.2f}"
+                  f", {"Bin" if "visium" in technology.lower() else "Cell centroid"} size: {target_diameter_um}um"
+                  f"{", " + image_info if image_info else ""})")
 
     # --- Blowup Region (ax2) ---
 
