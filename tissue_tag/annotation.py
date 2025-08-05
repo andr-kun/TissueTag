@@ -23,6 +23,8 @@ from skimage import feature, future
 from skimage.draw import polygon, disk
 from skimage.future import trainable_segmentation
 from sklearn.ensemble import RandomForestClassifier
+from sklearn.linear_model import LogisticRegression
+from sklearn.exceptions import NotFittedError
 from scanpy.preprocessing import normalize_total
 
 from tissue_tag.io import TissueTagAnnotation
@@ -424,14 +426,18 @@ def rgb_from_labels(tissue_tag_annotation):
     return labelimage_rgb.astype('uint8')
 
 
-def sk_rf_classifier(tissue_tag_annotation, plot=True, copy=False):
+def sk_rf_classifier(tissue_tag_annotation, classifier="RandomForest", threshold=None, plot=True, copy=False):
     """
-    A simple random forest pixel classifier from sklearn using all RGB channels as features.
+    A pixel classifier using all RGB channels as features.
 
     Parameters
     ----------
     tissue_tag_annotation: TissueTagAnnotation
         TissueTagAnnotation object with image, label_image and annotation map.
+    classifier: str, optional
+        Algorithm to use for classification. Currently supported algorithms are RandomForest and LogisticRegression from sklearn.
+    threshold: float, optional
+        Minimum probability score threshold for a pixel to be assigned a label by the random forest classifier.
     plot: bool, optional
         Plot the resulting label_image after running the clasifier.
     copy: bool, optional
@@ -443,6 +449,40 @@ def sk_rf_classifier(tissue_tag_annotation, plot=True, copy=False):
         TissueTagAnnotation object with updated label_image based on the classifier prediction if copy is True,
         otherwise None.
     """
+
+    def predict_segmenter_thresholded(features, clf, threshold):
+        sh = features.shape
+        if features.ndim > 2:
+            features = features.reshape((-1, sh[-1]))
+
+        try:
+            predicted_labels_probability = clf.predict_proba(features)
+        except NotFittedError:
+            raise NotFittedError(
+                "You must train the classifier `clf` first"
+                "for example with the `fit_segmenter` function."
+            )
+        except ValueError as err:
+            if err.args and 'x must consist of vectors of length' in err.args[0]:
+                raise ValueError(
+                    err.args[0]
+                    + '\n'
+                    + "Maybe you did not use the same type of features for training the classifier."
+                )
+            else:
+                raise err
+
+        label_classes = np.concatenate((np.array([0]), clf.classes_))
+        max_probability_indices = np.argmax(predicted_labels_probability, axis=1) + 1
+        no_label_mask = np.max(predicted_labels_probability, axis=1) < threshold
+        max_probability_indices[no_label_mask] = 0
+        predicted_labels = label_classes[max_probability_indices]
+
+        output = predicted_labels.reshape(sh[:-1])
+        return output
+
+    if classifier not in ["RandomForest", "LogisticRegression"]:
+        raise ValueError("Classifier is not supported. Currently supported classifiers are RandomForest and LogisticRegression.")
 
     tissue_tag_annotation = cp.deepcopy(tissue_tag_annotation) if copy else tissue_tag_annotation
 
@@ -456,15 +496,21 @@ def sk_rf_classifier(tissue_tag_annotation, plot=True, copy=False):
     print("[INFO] Extracting features from all RGB channels...")
     features = features_func(tissue_tag_annotation.image)  # Extract multiscale features for all channels at once
 
-    print("[INFO] Training Random Forest classifier on RGB features...")
-    clf = RandomForestClassifier(n_estimators=50, n_jobs=-1, max_depth=10, max_samples=0.05)
+    print(f"[INFO] Training {classifier} classifier on RGB features...")
+    if classifier == "RandomForest":
+        clf = RandomForestClassifier(n_estimators=50, n_jobs=-1, max_depth=10, max_samples=0.05)
+    else:
+        clf = LogisticRegression(n_jobs=-1, random_state=42)
     clf = trainable_segmentation.fit_segmenter(tissue_tag_annotation.label_image, features, clf)
 
     print("[INFO] Predicting labels based on trained classifier...")
-    predicted_labels = trainable_segmentation.predict_segmenter(features, clf)
+    if threshold is not None:
+        print(f"[INFO] - Using {threshold} probability threshold for assigning label.")
+        predicted_labels = predict_segmenter_thresholded(features, clf, threshold)
+    else:
+        predicted_labels = trainable_segmentation.predict_segmenter(features, clf)
 
     print("[INFO] Final label prediction completed.")
-
     tissue_tag_annotation.label_image = predicted_labels
 
     if plot:
