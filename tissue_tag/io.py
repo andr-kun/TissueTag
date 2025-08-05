@@ -621,8 +621,8 @@ def plot_10x_spatial_image(
     ax1.add_collection(collection)
 
     ax1.set_title(f"{technology} Spatial Data (PPM: {ppm:.2f}"
-                  f", {"Bin" if "visium" in technology.lower() else "Cell centroid"} size: {target_diameter_um}um"
-                  f"{", " + image_info if image_info else ""})")
+                  f", {'Bin' if 'visium' in technology.lower() else 'Cell centroid'} size: {target_diameter_um}um"
+                  f"{', ' + image_info if image_info else ''})")
 
     # --- Blowup Region (ax2) ---
 
