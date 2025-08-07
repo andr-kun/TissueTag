@@ -12,6 +12,7 @@ import matplotlib.font_manager as fm
 import numpy as np
 import panel as pn
 import pandas as pd
+import cv2
 from PIL import Image, ImageDraw, ImageFont, ImageColor
 from bokeh.models import FreehandDrawTool, PolyDrawTool
 from holoviews.operation import datashader as hd
@@ -26,6 +27,7 @@ from sklearn.ensemble import RandomForestClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.exceptions import NotFittedError
 from scanpy.preprocessing import normalize_total
+from tinybrain import downsample_segmentation
 
 from tissue_tag.io import TissueTagAnnotation
 
@@ -426,7 +428,7 @@ def rgb_from_labels(tissue_tag_annotation):
     return labelimage_rgb.astype('uint8')
 
 
-def sk_rf_classifier(tissue_tag_annotation, classifier="RandomForest", threshold=None, plot=True, copy=False):
+def pixel_label_classifier(tissue_tag_annotation, classifier="RandomForest", threshold=None, downsampling_factor=1, plot=True, copy=False):
     """
     A pixel classifier using all RGB channels as features.
 
@@ -438,6 +440,8 @@ def sk_rf_classifier(tissue_tag_annotation, classifier="RandomForest", threshold
         Algorithm to use for classification. Currently supported algorithms are RandomForest and LogisticRegression from sklearn.
     threshold: float, optional
         Minimum probability score threshold for a pixel to be assigned a label by the random forest classifier.
+    downsampling_factor: integer, optional
+        Downsampling factor to resize image and label_image prior to running classifier. Default value of 1 means no downsampling is performed.
     plot: bool, optional
         Plot the resulting label_image after running the clasifier.
     copy: bool, optional
@@ -493,15 +497,26 @@ def sk_rf_classifier(tissue_tag_annotation, classifier="RandomForest", threshold
                             intensity=True, edges=True, texture=True,
                             sigma_min=sigma_min, sigma_max=sigma_max, channel_axis=-1)  # Process all channels together
 
+    image = tissue_tag_annotation.image
+    label_image = tissue_tag_annotation.label_image
+
+    if downsampling_factor > 1:
+        print("[INFO] Downsampling image and label_image...")
+        label_image = downsample_segmentation(label_image, (downsampling_factor, downsampling_factor))[0]
+        image = cv2.resize(image, label_image.shape[::-1], interpolation=cv2.INTER_LANCZOS4)
+        print(f"[INFO]  - Original resolution: {tissue_tag_annotation.label_image.shape}. Downsampled resolution: {label_image.shape}")
+
     print("[INFO] Extracting features from all RGB channels...")
-    features = features_func(tissue_tag_annotation.image)  # Extract multiscale features for all channels at once
+    features = features_func(image)  # Extract multiscale features for all channels at once
+
+    del(image)
 
     print(f"[INFO] Training {classifier} classifier on RGB features...")
     if classifier == "RandomForest":
         clf = RandomForestClassifier(n_estimators=50, n_jobs=-1, max_depth=10, max_samples=0.05)
-    else:
+    elif classifier == "LogisticRegression":
         clf = LogisticRegression(n_jobs=-1, random_state=42)
-    clf = trainable_segmentation.fit_segmenter(tissue_tag_annotation.label_image, features, clf)
+    clf = trainable_segmentation.fit_segmenter(label_image, features, clf)
 
     print("[INFO] Predicting labels based on trained classifier...")
     if threshold is not None:
@@ -510,8 +525,17 @@ def sk_rf_classifier(tissue_tag_annotation, classifier="RandomForest", threshold
     else:
         predicted_labels = trainable_segmentation.predict_segmenter(features, clf)
 
+    if downsampling_factor > 1:
+        print("[INFO] Upsampling predicted label_image...")
+        predicted_labels = cv2.resize(predicted_labels, tissue_tag_annotation.label_image.shape[::-1], interpolation=cv2.INTER_NEAREST)
+
     print("[INFO] Final label prediction completed.")
     tissue_tag_annotation.label_image = predicted_labels
+
+    del(label_image)
+    del(predicted_labels)
+    del(features)
+    del(clf)
 
     if plot:
         print("[INFO] Generating visualization...")
