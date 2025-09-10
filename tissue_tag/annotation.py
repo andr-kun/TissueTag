@@ -983,7 +983,7 @@ def square_grid(spot_size, shape, space_every_spots):
     return positions
 
 
-def median_filter(tissue_tag_annotation, filter_radius=10, copy=False):
+def median_filter(tissue_tag_annotation, filter_radius=10, downsampling_factor=1, copy=False):
     """
     Apply a median filter to the label image of the TissueTagAnnotation object.
 
@@ -993,6 +993,8 @@ def median_filter(tissue_tag_annotation, filter_radius=10, copy=False):
         TissueTagAnnotation object with label_image.
     filter_radius : int, optional
         Radius of the median filter. Default is 10.
+    downsampling_factor: integer, optional
+        Downsampling factor to resize label_image prior to running the median filter. Default value of 1 means no downsampling is performed.
     copy: bool, optional
         Return a copy of TissueTagAnnotation object rather than updating the label_image in the original object.
 
@@ -1006,9 +1008,19 @@ def median_filter(tissue_tag_annotation, filter_radius=10, copy=False):
     from skimage.morphology import disk
 
     tissue_tag_annotation = cp.deepcopy(tissue_tag_annotation) if copy else tissue_tag_annotation
-
+    label_image_shape = tissue_tag_annotation.label_image.shape
     r = int(filter_radius * tissue_tag_annotation.ppm)
+
+    if downsampling_factor > 1:
+        r = r // downsampling_factor
+        tissue_tag_annotation.label_image = downsample_segmentation(tissue_tag_annotation.label_image,
+                                                                    (downsampling_factor, downsampling_factor))[0]
+
     tissue_tag_annotation.label_image = median(tissue_tag_annotation.label_image, footprint=disk(r))
+
+    if downsampling_factor > 1:
+        tissue_tag_annotation.label_image = cv2.resize(tissue_tag_annotation.label_image, label_image_shape[::-1],
+                                          interpolation=cv2.INTER_NEAREST)
 
     return tissue_tag_annotation if copy else None
 
